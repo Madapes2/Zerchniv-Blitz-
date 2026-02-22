@@ -4,11 +4,11 @@ import {
   BUILDER_ESSENCE_PER_TURN, KILL_ESSENCE_REWARD,
   SIEGE_UNITS_REQUIRED, STRUCTURE_CAPTURE_ROUNDS_SOLO,
   STRUCTURE_CAPTURE_ROUNDS_GROUP, GameResult
-} from "./constants";
+} from "./constants.js";
 import {
   GameRoomState, PlayerState, UnitInstance,
   StructureInstance, EssencePool, LogEntry
-} from "../rooms/schema/GameRoomState";
+} from "../rooms/schema/GameRoomState.js";
 import { ArraySchema } from "@colyseus/schema";
 
 // ============================================================
@@ -157,7 +157,7 @@ export function recalculateEssence(state: GameRoomState, playerId: string): void
   }
 
   // Structures
-  state.structures.forEach((structure) => {
+  state.structures.forEach((structure: StructureInstance) => {
     if (structure.ownerId !== playerId) return;
     const tile = state.tiles.get(structure.tileId);
     const element = tileTypeToElement(tile?.tileType ?? "neutral");
@@ -165,7 +165,7 @@ export function recalculateEssence(state: GameRoomState, playerId: string): void
   });
 
   // Builders
-  state.builders.forEach((builder) => {
+  state.builders.forEach((builder: BuilderInstance) => {
     if (builder.ownerId !== playerId) return;
     const tile = state.tiles.get(builder.tileId);
     const element = tileTypeToElement(tile?.tileType ?? "neutral");
@@ -266,7 +266,7 @@ function checkSiege(state: GameRoomState, defenderId: string): boolean {
   const empireNeighbors = getHexNeighbors(defender.empire.tileId, 1);
   let enemyUnitsNearby = 0;
 
-  state.units.forEach((unit) => {
+  state.units.forEach((unit: UnitInstance) => {
     if (unit.ownerId === defenderId) return;
     if (empireNeighbors.includes(unit.tileId) || unit.tileId === defender.empire.tileId) {
       enemyUnitsNearby++;
@@ -324,15 +324,15 @@ export function getValidMeleeTargets(
 
   adjacent.forEach(tileId => {
     // Enemy units
-    state.units.forEach((u, uid) => {
+    state.units.forEach((u: UnitInstance, uid: string) => {
       if (u.ownerId !== unit.ownerId && u.tileId === tileId) targets.push(uid);
     });
     // Enemy structures
-    state.structures.forEach((s, sid) => {
+    state.structures.forEach((s: StructureInstance, sid: string) => {
       if (s.ownerId !== unit.ownerId && s.tileId === tileId) targets.push(sid);
     });
     // Enemy empire
-    state.players.forEach((p, pid) => {
+    state.players.forEach((p: PlayerState, pid: string) => {
       if (pid !== unit.ownerId && p.empire.isPlaced && p.empire.tileId === tileId) {
         targets.push(`empire:${pid}`);
       }
@@ -353,15 +353,15 @@ export function getValidRangedTargets(
   const targets: string[] = [];
 
   inRange.forEach(tileId => {
-    state.units.forEach((u, uid) => {
+    state.units.forEach((u: UnitInstance, uid: string) => {
       if (u.ownerId !== unit.ownerId && u.tileId === tileId) {
         if (!u.cannotBeRangedTargeted) targets.push(uid);
       }
     });
-    state.structures.forEach((s, sid) => {
+    state.structures.forEach((s: StructureInstance, sid: string) => {
       if (s.ownerId !== unit.ownerId && s.tileId === tileId) targets.push(sid);
     });
-    state.players.forEach((p, pid) => {
+    state.players.forEach((p: PlayerState, pid: string) => {
       if (pid !== unit.ownerId && p.empire.isPlaced && p.empire.tileId === tileId) {
         targets.push(`empire:${pid}`);
       }

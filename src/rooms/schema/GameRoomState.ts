@@ -1,5 +1,5 @@
 import { Schema, MapSchema, ArraySchema, type } from "@colyseus/schema";
-import { Element, Phase, UnitSize, GameResult } from "../game/constants";
+import { Element, Phase, UnitSize, GameResult } from "../../game/constants.js";
 
 // ============================================================
 // TILE

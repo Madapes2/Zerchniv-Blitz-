@@ -1,17 +1,17 @@
 import { Room, Client } from "colyseus";
-import { GameRoomState, PlayerState, UnitInstance, StructureInstance, BuilderInstance, Tile, Empire } from "./schema/GameRoomState";
+import { GameRoomState, PlayerState, UnitInstance, StructureInstance, BuilderInstance, Tile, Empire } from "./schema/GameRoomState.js";
 import {
   Phase, GameResult, Element, CardType,
   CARD_DEFINITIONS, UnitCardDef, BlitzCardDef, StructureCardDef,
   STRUCTURE_MAX_HP, EMPIRE_MAX_HP, NEUTRAL_TILES_PER_PLAYER,
   ELEMENTAL_TILES_PER_PLAYER, FIRST_PLAYER_NO_DEV_REST_ROUNDS
-} from "../game/constants";
+} from "../game/constants.js";
 import {
   recalculateEssence, canAfford, spendEssence, addEssence,
   resolveAttack, checkWinConditions, getValidMoveTiles,
   getValidMeleeTargets, getValidRangedTargets, addLog,
   shuffleDeck, drawCard, hexDistance, tileTypeToElement, rollD10
-} from "../game/GameLogic";
+} from "../game/GameLogic.js";
 
 // ============================================================
 // MESSAGE TYPES (client → server)
@@ -242,7 +242,7 @@ export class GameRoom extends Room<GameRoomState> {
     addLog(this.state, `${player.displayName} placed their Empire at ${tileId}.`);
 
     // Check if both empires are placed
-    const allPlaced = Array.from(this.state.players.values()).every(p => p.empireSet);
+    const allPlaced = Array.from(this.state.players.values()).every((p: PlayerState) => p.empireSet);
     if (allPlaced) {
       this.startStandbyPhase();
     }
@@ -264,7 +264,7 @@ export class GameRoom extends Room<GameRoomState> {
     addLog(this.state, `${player.displayName}'s Standby Phase. Essence: N${player.essence.neutral} F${player.essence.fire} W${player.essence.water}`);
 
     // Clear per-turn unit flags and bonuses
-    this.state.units.forEach((unit) => {
+    this.state.units.forEach((unit: UnitInstance) => {
       if (unit.ownerId === playerId) {
         unit.hasMovedThisTurn = false;
         unit.hasAttackedThisTurn = false;
@@ -769,7 +769,7 @@ export class GameRoom extends Room<GameRoomState> {
 
     // Can spawn adjacent to owned structures
     let valid = false;
-    this.state.structures.forEach((s) => {
+    this.state.structures.forEach((s: StructureInstance) => {
       if (s.ownerId === playerId) {
         const structureNeighbors = [s.tileId, ...this.getNeighborIds(s.tileId)];
         if (structureNeighbors.includes(tileId)) valid = true;
@@ -780,30 +780,28 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   private getNeighborIds(tileId: string): string[] {
-    // Import from GameLogic — simplified here
     const { row, col } = { row: parseInt(tileId.split("c")[0].replace("r", "")), col: parseInt(tileId.split("c")[1]) };
     const isOdd = row % 2 !== 0;
     const offsets = isOdd
       ? [[-1,0],[-1,1],[0,-1],[0,1],[1,0],[1,1]]
       : [[-1,-1],[-1,0],[0,-1],[0,1],[1,-1],[1,0]];
-    return offsets.map(([dr, dc]) => `r${row+dr}c${col+dc}`);
+    return offsets.map(([dr, dc]) => `r${row+dr!}c${col+dc!}`);
   }
 
   private checkStructureCapture(unitId: string) {
     const unit = this.state.units.get(unitId);
     if (!unit) return;
 
-    this.state.structures.forEach((structure) => {
-      if (structure.ownerId === unit.ownerId) return; // Can't capture own structure
+    this.state.structures.forEach((structure: StructureInstance) => {
+      if (structure.ownerId === unit.ownerId) return;
 
       const neighbors = this.getNeighborIds(structure.tileId);
       const nearbyEnemies = Array.from(this.state.units.values()).filter(
-        u => u.ownerId === unit.ownerId && neighbors.includes(u.tileId)
+        (u: UnitInstance) => u.ownerId === unit.ownerId && neighbors.includes(u.tileId)
       );
 
-      // Check for contesting units (owner's units nearby)
       const nearbyOwnerUnits = Array.from(this.state.units.values()).filter(
-        u => u.ownerId === structure.ownerId && neighbors.includes(u.tileId)
+        (u: UnitInstance) => u.ownerId === structure.ownerId && neighbors.includes(u.tileId)
       );
 
       if (nearbyOwnerUnits.length > 0) {
