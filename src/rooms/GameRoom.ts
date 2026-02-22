@@ -35,13 +35,13 @@ type Msg =
   | { type: "request_valid_moves"; unitId: string }
   | { type: "request_valid_targets"; unitId: string; attackType: "melee" | "ranged" };
 
-export class GameRoom extends Room<GameRoomState> {
+export class GameRoom extends Room<{ state: GameRoomState }> {
 
   private instanceCounter = 0;
 
   // Typed accessor so this.state is always GameRoomState
   get gs(): GameRoomState {
-    return this.state as unknown as GameRoomState;
+    return this.state as GameRoomState;
   }
 
   onCreate(options: any) {
