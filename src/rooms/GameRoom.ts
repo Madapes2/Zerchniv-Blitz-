@@ -35,7 +35,7 @@ type Msg =
   | { type: "request_valid_moves"; unitId: string }
   | { type: "request_valid_targets"; unitId: string; attackType: "melee" | "ranged" };
 
-export class GameRoom extends Room<GameRoomState> {
+export class GameRoom extends Room {
 
   private instanceCounter = 0;
 
@@ -242,7 +242,7 @@ export class GameRoom extends Room<GameRoomState> {
     addLog(this.state, `${player.displayName} placed their Empire at ${tileId}.`);
 
     // Check if both empires are placed
-    const allPlaced = Array.from(this.state.players.values()).every((p: PlayerState) => p.empireSet);
+    const allPlaced = (Array.from(this.state.players.values()) as PlayerState[]).every((p: PlayerState) => p.empireSet);
     if (allPlaced) {
       this.startStandbyPhase();
     }
@@ -749,8 +749,8 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   private getOtherPlayerId(sessionId: string): string {
-    const ids = Array.from(this.state.players.keys());
-    return ids.find(id => id !== sessionId) ?? "";
+    const ids = Array.from(this.state.players.keys()) as string[];
+    return ids.find((id: string) => id !== sessionId) ?? "";
   }
 
   private getPlayerName(sessionId: string): string {
@@ -796,11 +796,11 @@ export class GameRoom extends Room<GameRoomState> {
       if (structure.ownerId === unit.ownerId) return;
 
       const neighbors = this.getNeighborIds(structure.tileId);
-      const nearbyEnemies = Array.from(this.state.units.values()).filter(
+      const nearbyEnemies = (Array.from(this.state.units.values()) as UnitInstance[]).filter(
         (u: UnitInstance) => u.ownerId === unit.ownerId && neighbors.includes(u.tileId)
       );
 
-      const nearbyOwnerUnits = Array.from(this.state.units.values()).filter(
+      const nearbyOwnerUnits = (Array.from(this.state.units.values()) as UnitInstance[]).filter(
         (u: UnitInstance) => u.ownerId === structure.ownerId && neighbors.includes(u.tileId)
       );
 

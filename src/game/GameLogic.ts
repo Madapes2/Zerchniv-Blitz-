@@ -7,7 +7,7 @@ import {
 } from "./constants.js";
 import {
   GameRoomState, PlayerState, UnitInstance,
-  StructureInstance, EssencePool, LogEntry
+  StructureInstance, BuilderInstance, EssencePool, LogEntry
 } from "../rooms/schema/GameRoomState.js";
 import { ArraySchema } from "@colyseus/schema";
 
