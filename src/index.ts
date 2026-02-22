@@ -1,16 +1,24 @@
-/**
- * IMPORTANT:
- * ---------
- * Do not manually edit this file if you'd like to host your server on Colyseus Cloud
- *
- * If you're self-hosting, you can see "Raw usage" from the documentation.
- * 
- * See: https://docs.colyseus.io/server
- */
-import { listen } from "@colyseus/tools";
+import { Server } from "colyseus";
+import { createServer } from "http";
+import { GameRoom } from "./rooms/GameRoom";
+import express from "express";
 
-// Import Colyseus config
-import app from "./app.config.js";
+const port = Number(process.env.PORT || 2567);
+const app = express();
 
-// Create and listen on 2567 (or PORT environment variable.)
-listen(app);
+app.use(express.json());
+
+// Health check endpoint
+app.get("/", (req, res) => {
+  res.json({ status: "Zerchniv-Blitz server running", timestamp: new Date().toISOString() });
+});
+
+const httpServer = createServer(app);
+const gameServer = new Server({ server: httpServer });
+
+// Register rooms
+gameServer.define("game_room", GameRoom).filterBy(["matchId"]);
+
+gameServer.listen(port).then(() => {
+  console.log(`✅ Zerchniv-Blitz server listening on port ${port}`);
+});
