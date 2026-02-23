@@ -2068,13 +2068,7 @@ const M = (() => {
 /* ═══ PATCH: connect startBat & startAI to match screen ═══ */
 function startBat(){
   if(!document.getElementById('dsel').value){flashSel();return;}
-  op('mmod');
-  let s=0;
-  matchInt=setInterval(()=>{
-    s++;
-    document.getElementById('msub').textContent=s<8?`Searching... ${s}s`:'No opponents found — launching AI match!';
-    if(s>=8){clearInterval(matchInt);cl('mmod');launchMatch();}
-  },1000);
+  NET.queueMatchmaking();
 }
 function startAI(){
   clearInterval(matchInt); cl('mmod');
