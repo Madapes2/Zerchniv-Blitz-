@@ -72,13 +72,21 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     this.gs.players.set(client.sessionId, player);
     addLog(this.gs, `${player.displayName} joined.`);
 
-    if (this.gs.players.size === 2) {
+    if (this.clients.length === 2) {
       this.startGame();
     }
   }
 
-  onLeave(client: Client) {
-    addLog(this.gs, `Player disconnected: ${client.sessionId}`);
+onLeave(client: Client) {
+  const p = this.gs.players.get(client.sessionId);
+  addLog(this.gs, `${p?.displayName ?? client.sessionId} disconnected.`);
+
+  // IMPORTANT: remove from state map so player counts stay accurate
+  this.gs.players.delete(client.sessionId);
+
+  // Optional: if you want the match to end when someone leaves
+  // this.disconnect();
+}
   }
 
   // ============================================================
