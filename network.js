@@ -81,7 +81,7 @@
   //  CONFIG — update SERVER_URL to your Colyseus Cloud instance
   // ────────────────────────────────────────────────────────────────
   const CONFIG = {
-    SERVER_URL: 'wws://us-mia-55cdd0b8.colyseus.cloud',  // ← CHANGE THIS
+    SERVER_URL: 'https://us-mia-55cdd0b8.colyseus.cloud',  // ← CHANGE THIS
     ROOM_NAME:  'game_room',
     RECONNECT_ATTEMPTS: 3,
     MATCHMAKING_TIMEOUT_MS: 30000,
