@@ -82,7 +82,7 @@
   // ────────────────────────────────────────────────────────────────
   const CONFIG = {
     SERVER_URL: 'wws://us-mia-55cdd0b8.colyseus.cloud',  // ← CHANGE THIS
-    ROOM_NAME:  'zerchniv_room',
+    ROOM_NAME:  'game_room',
     RECONNECT_ATTEMPTS: 3,
     MATCHMAKING_TIMEOUT_MS: 30000,
   };
