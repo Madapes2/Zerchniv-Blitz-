@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!DOCTYPE html>
+
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -473,8 +473,8 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Rajdhani',sans-ser
     <div class="mside left">
       <div class="mside-lbl">AI Decks</div>
       <div class="deck-stack">
-        <div class="mdk unit"><div class="mdk-count" id="m-ai-udk">14</div><div class="mdk-name">Unit</div></div>
-        <div class="mdk blitz"><div class="mdk-count" id="m-ai-bdk">9</div><div class="mdk-name">Blitz</div></div>
+        <div class="mdk unit"><div class="mdk-count" id="m-ai-udk">15</div><div class="mdk-name">Unit</div></div>
+        <div class="mdk blitz"><div class="mdk-count" id="m-ai-bdk">10</div><div class="mdk-name">Blitz</div></div>
         <div class="mdk disc"><div class="mdk-count" id="m-ai-disc">0</div><div class="mdk-name">Disc.</div></div>
       </div>
       <div class="mside-lbl" style="margin-top:.25rem">AI Units on Field</div>
@@ -564,9 +564,6 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Rajdhani',sans-ser
 
 <!-- TOAST -->
 <div class="mtoast" id="m-toast"></div>
-
-</body>
-</html>
 
 <canvas id="hxc"></canvas>
 <div class="vig"></div>
@@ -2020,7 +2017,7 @@ const M = (() => {
       plHP:20, aiHP:20,
       ess:{n:2,f:0,w:0},
       hand:[], plUnits:[], aiUnits:[],
-      plDeckU:15, plDeckB:10, aiDeckU:14, aiDeckB:9,
+      plDeckU:15, plDeckB:10, aiDeckU:15, aiDeckB:10,
       plDisc:0, aiDisc:0,
       selUnit:null, selTile:null, actionMode:null,
       aiEmpireTile:0, plEmpireTile:0,
@@ -2082,3 +2079,6 @@ function launchMatch(){
 function cancelM(){clearInterval(matchInt);cl('mmod');}
 
 </script>
+
+</body>
+</html>
