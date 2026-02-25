@@ -669,40 +669,41 @@ class HexBoardScene extends Phaser.Scene {
 //  PHASER CONFIG & LAUNCH
 // ══════════════════════════════════════════════════════════════
 
-(function launchPhaser() {
+function _initPhaser() {
+  const wrap = document.querySelector('.mboard-wrap');
+  const w = wrap ? wrap.clientWidth  : window.innerWidth  - 380;
+  const h = wrap ? wrap.clientHeight : window.innerHeight - 180;
+
+  const config = {
+    type:   Phaser.CANVAS,
+    canvas: document.getElementById('m-canvas'),
+    width:  Math.max(w, 100),
+    height: Math.max(h, 100),
+    backgroundColor: '#07050A',
+    scene:  HexBoardScene,
+  };
+
+  window.PhaserGame = new Phaser.Game(config);
+}
+
+// Wait for DOM to be fully ready before touching document.body or any elements
+document.addEventListener('DOMContentLoaded', function() {
   const canvas = document.getElementById('m-canvas');
-  if (!canvas) {
-    // Match screen isn't visible yet — wait for it
-    const observer = new MutationObserver(() => {
-      if (document.getElementById('m-canvas') &&
-          document.getElementById('mscr').classList.contains('on')) {
+  if (canvas) {
+    // Canvas already in DOM — init immediately
+    _initPhaser();
+  } else {
+    // Canvas is inside the match screen overlay which may be hidden/added later.
+    // Watch for it to appear.
+    const observer = new MutationObserver(function() {
+      if (document.getElementById('m-canvas')) {
         observer.disconnect();
-        _init();
+        _initPhaser();
       }
     });
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
-    return;
+    observer.observe(document.body, { childList: true, subtree: true });
   }
-  _init();
-
-  function _init() {
-    const wrap = document.querySelector('.mboard-wrap');
-    const w = wrap ? wrap.clientWidth  : window.innerWidth  - 380;
-    const h = wrap ? wrap.clientHeight : window.innerHeight - 180;
-
-    const config = {
-      type:   Phaser.CANVAS,
-      canvas: document.getElementById('m-canvas'),
-      width:  w,
-      height: h,
-      backgroundColor: '#07050A',
-      scene:  HexBoardScene,
-      // No physics needed for a turn-based board game
-    };
-
-    window.PhaserGame = new Phaser.Game(config);
-  }
-})();
+});
 
 // ══════════════════════════════════════════════════════════════
 //  BRIDGE: connects DOM action buttons → Phaser scene
