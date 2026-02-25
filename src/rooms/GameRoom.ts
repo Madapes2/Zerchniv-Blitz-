@@ -92,8 +92,7 @@ onLeave(client: Client) {
   // GAME START
   // ============================================================
 
-  private startGame() {
-    // Randomly pick who goes first
+private startGame() {
     const playerIds = Array.from(this.gs.players.keys());
     const flip = Math.random() < 0.5;
     this.gs.activePlayerId = flip ? playerIds[0] : playerIds[1];
@@ -101,17 +100,14 @@ onLeave(client: Client) {
     this.gs.currentPhase = Phase.SETUP_TILES;
     addLog(this.gs, `Game started! ${this.getPlayerName(this.gs.activePlayerId)} places tiles first.`);
 
-    // Send starting hand guarantee: each player picks 1 unit from their deck
-    // (handled by draw on first turn — guaranteed via deck ordering in deckbuilder)
-  }
-
-  // Notify both clients
-this.clients.forEach(client => {
-    client.send("game_start", {
+    // Notify both clients
+    this.clients.forEach(client => {
+      client.send("game_start", {
         yourSeat: client.sessionId === this.gs.activePlayerId ? "p1" : "p2",
         state: {}
+      });
     });
-});
+  }
 
   // ============================================================
   // MESSAGE ROUTER
