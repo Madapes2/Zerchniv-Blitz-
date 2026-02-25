@@ -288,7 +288,15 @@
       return;
     }
 
-    _room = await _client.joinOrCreate(CONFIG.ROOM_NAME, options);
+    const joinOptions = {
+      ...options,
+      displayName: options.userId || 'Player',
+      unitDeck: [],
+      blitzDeck: [],
+      extraDeck: [],
+    };
+
+    _room = await _client.joinOrCreate(CONFIG.ROOM_NAME, joinOptions);
     console.log('[NET] Joined room:', _room.roomId, '| Session:', _room.sessionId);
 
     _attachRoomListeners();
