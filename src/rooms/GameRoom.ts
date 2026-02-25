@@ -105,6 +105,14 @@ onLeave(client: Client) {
     // (handled by draw on first turn — guaranteed via deck ordering in deckbuilder)
   }
 
+  // Notify both clients
+this.clients.forEach(client => {
+    client.send("game_start", {
+        yourSeat: client.sessionId === this.gs.activePlayerId ? "p1" : "p2",
+        state: {}
+    });
+});
+
   // ============================================================
   // MESSAGE ROUTER
   // ============================================================
