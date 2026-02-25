@@ -87,7 +87,6 @@ onLeave(client: Client) {
   // Optional: if you want the match to end when someone leaves
   // this.disconnect();
 }
-  }
 
   // ============================================================
   // GAME START
