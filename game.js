@@ -45,9 +45,9 @@ const COLOR = {
   HL_ATTAK: 0xFF3030,   // red         — attack target
   HL_SEL:   0xD4A020,   // gold        — selected unit
   TOKEN_PL: 0xE8E8F0,   // white/silver — player token
-  TOKEN_AI: 0xE84030,   // red          — AI token
+  TOKEN_OPP: 0xE84030,  // red          — opponent token
   EMPIRE_PL:0x2060CC,
-  EMPIRE_AI:0xCC2020,
+  EMPIRE_OPP:0xCC2020,
 };
 
 // ── Build the tile map ─────────────────────────────────────────────
@@ -321,7 +321,9 @@ class HexBoardScene extends Phaser.Scene {
       return;
     }
 
-    if (action === 'move' && tile.highlight === HL.MOVE) {
+    if (action === 'deploy' && tile.highlight === HL.PLACEMENT) {
+      this._doDeploy(tile);
+    } else if (action === 'move' && tile.highlight === HL.MOVE) {
       this._doMove(tile);
     } else if ((action === 'melee' || action === 'ranged') && tile.highlight === HL.ATTACK) {
       this._doAttack(tile, action);
@@ -370,6 +372,7 @@ class HexBoardScene extends Phaser.Scene {
 
   // Called by DOM buttons (Move / Melee / Ranged)
   selectAction(action) {
+    if (!this.isMyTurn) return;   // hard block — not your turn
     if (!this.selectedUnit) return;
     this.currentAction = action;
     this._clearHighlights();
@@ -452,6 +455,37 @@ class HexBoardScene extends Phaser.Scene {
     this._clearSelection();
   }
 
+  _doDeploy(targetTile) {
+    const card = this.pendingDeployCard;
+    if (!card) return;
+
+    // Send to server
+    if (typeof NET !== 'undefined') {
+      NET.deployUnit(card.id, targetTile.id);
+    } else if (window.networkModule && window.networkModule.isConnected()) {
+      window.networkModule.deployUnit(card.id, targetTile.id);
+    }
+
+    // Optimistic local preview — server will confirm via state update
+    const previewUnit = {
+      id: 'pending_' + card.id + '_' + Date.now(),
+      tileId: targetTile.id,
+      owner: 'player',
+      name: card.name,
+      hp: card.hp,
+      maxHp: card.hp,
+      speed: card.speed || 1,
+      deployRest: true,   // just deployed — can't act this turn
+      hasMoved: true,
+      hasActed: true,
+    };
+    this.gameState.units.push(previewUnit);
+    this._spawnToken(previewUnit);
+
+    this.pendingDeployCard = null;
+    this._clearSelection();
+  }
+
   // ══════════════════════════════════════════════════════════
   //  TOKEN RENDERING
   // ══════════════════════════════════════════════════════════
@@ -463,7 +497,7 @@ class HexBoardScene extends Phaser.Scene {
 
     const { x, y } = this._tileCenter(tile);
     const gfx = this.add.graphics();
-    const color = unit.owner === 'player' ? COLOR.TOKEN_PL : COLOR.TOKEN_AI;
+    const color = unit.owner === 'player' ? COLOR.TOKEN_PL : COLOR.TOKEN_OPP;
     const r = this.hexSize * 0.38;
 
     gfx.fillStyle(color, 1);
@@ -539,6 +573,42 @@ class HexBoardScene extends Phaser.Scene {
     window.dispatchEvent(new CustomEvent('setupTileClicked', { detail: tile }));
   }
 
+  // Show valid deployment tiles around the player's empire
+  showDeployHighlights(empireTileId) {
+    this._clearHighlights();
+    const empireTile = this.tiles.find(t => t.id === empireTileId);
+    if (!empireTile) return;
+    this.tiles.forEach(t => {
+      if (
+        hexDistance(empireTile, t) <= 2 &&  // within 2 of empire
+        t.id !== empireTileId &&             // not the empire itself
+        !this._unitAt(t.id) &&              // not already occupied
+        t.type !== TILE_TYPE.HIDDEN          // must be a revealed tile
+      ) {
+        t.highlight = HL.PLACEMENT;
+      }
+    });
+    this._refreshAll();
+  }
+
+  // Called when player clicks "Deploy Unit" — awaits tile selection
+  beginDeploy(card) {
+    if (!this.isMyTurn) return;
+    this.pendingDeployCard = card;
+    this.currentAction = 'deploy';
+    // Find our empire tile
+    const empire = this.gameState.empires.find(e => e.owner === 'player');
+    if (empire) {
+      this.showDeployHighlights(empire.tileId);
+    } else {
+      // Fallback: highlight all empty revealed tiles
+      this.tiles.forEach(t => {
+        if (!this._unitAt(t.id) && t.type !== TILE_TYPE.HIDDEN) t.highlight = HL.PLACEMENT;
+      });
+      this._refreshAll();
+    }
+  }
+
   // ══════════════════════════════════════════════════════════
   //  COLYSEUS STATE SYNC
   // ══════════════════════════════════════════════════════════
@@ -571,13 +641,22 @@ class HexBoardScene extends Phaser.Scene {
           this.gameState.units.push(su);
           this._spawnToken(su);
         } else {
-          // Unit moved or changed — update
+          // Unit moved or changed — update token position
           if (existing.tileId !== su.tileId) {
+            // Clear old tile occupancy
+            const oldTile = this.tiles.find(t => t.id === existing.tileId);
+            if (oldTile) oldTile.unit = null;
             const newTile = this.tiles.find(t => t.id === su.tileId);
-            if (newTile) this._moveToken(su.id, newTile);
+            if (newTile) {
+              newTile.unit = su.id;
+              this._moveToken(su.id, newTile);
+            }
           }
           Object.assign(existing, su);
         }
+        // Always ensure the tile knows who is on it (survives board rebuilds)
+        const occupiedTile = this.tiles.find(t => t.id === su.tileId);
+        if (occupiedTile) occupiedTile.unit = su.id;
       });
 
       this.gameState.units = this.gameState.units.filter(u => serverIds.has(u.id));
@@ -585,12 +664,30 @@ class HexBoardScene extends Phaser.Scene {
 
     // 3. Whose turn
     if (state.currentPlayer !== undefined) {
+      const wasMyTurn = this.isMyTurn;
       this.isMyTurn = state.currentPlayer === 'player';
+      // When turn changes away from us, clear any pending selection/action
+      if (wasMyTurn && !this.isMyTurn) {
+        this._clearSelection();
+      }
+      // Update the "Opponent" label to show whose turn it is
+      const oppLabel = document.getElementById('m-ai-name');
+      if (oppLabel) oppLabel.textContent = this.isMyTurn ? 'Opponent' : 'Opponent ◀ TURN';
     }
 
     // 4. Phase
     if (state.phase !== undefined) {
       this.gameState.phase = state.phase;
+      // On new turn start, reset hasMoved/hasActed flags on our units
+      if (state.phase === 'main') {
+        this.gameState.units.forEach(u => {
+          if (u.owner === 'player') {
+            u.hasMoved  = false;
+            u.hasActed  = false;
+            u.deployRest = false;
+          }
+        });
+      }
     }
 
     this._refreshAll();
@@ -609,17 +706,23 @@ class HexBoardScene extends Phaser.Scene {
       this.scale.resize(w, h);
       this._calculateLayout();
       this._buildBoard();
-      // Re-draw tokens at new positions
-      for (const [unitId, gfx] of this.tokenGfx) {
-        const unit = this.gameState.units.find(u => u.id === unitId);
-        if (!unit) continue;
-        const tile = this.tiles.find(t => t.id === unit.tileId);
-        if (tile) {
-          const { x, y } = this._tileCenter(tile);
-          gfx.setPosition(x, y);
-        }
-      }
+      this._resyncTokenPositions();
     });
+  }
+
+  // Re-draw all tokens at correct positions (after resize or board rebuild)
+  _resyncTokenPositions() {
+    for (const [unitId, gfx] of this.tokenGfx) {
+      const unit = this.gameState.units.find(u => u.id === unitId);
+      if (!unit) continue;
+      const tile = this.tiles.find(t => t.id === unit.tileId);
+      if (tile) {
+        const { x, y } = this._tileCenter(tile);
+        gfx.setPosition(x, y);
+        // Re-sync tile occupancy after board rebuild
+        tile.unit = unitId;
+      }
+    }
   }
 
   // ══════════════════════════════════════════════════════════
