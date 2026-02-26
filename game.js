@@ -4,27 +4,26 @@
 // ============================================================
 
 // ── Hex grid layout ─────────────────────────────────────────
-// 64 flat-top hexes arranged in a diamond/rhombus shape
-// matching the board image from the design doc.
-// Offset coords: "odd-q" vertical layout
-// Rows: col widths  3,4,5,6,7,8,7,6,5,4,3  = 64 tiles total
+// POINTY-TOP hexes in ROWS forming a sideways diamond.
+// Wide at center, tapers to points on left and right.
+// Row layout (cols per row), symmetric top/bottom:
+//   rows 0,10: 3 cols   rows 1,9: 4 cols   rows 2,8: 5 cols
+//   rows 3,7:  6 cols   rows 4,6: 7 cols   row 5:    8 cols (center)
+// Total = 3+4+5+6+7+8+7+6+5+4+3 = 58 tiles
 
-const BOARD_COLS = [
-  { col: 0,  rows: 3,  rowStart: 4 },
-  { col: 1,  rows: 4,  rowStart: 3 },
-  { col: 2,  rows: 5,  rowStart: 2 },
-  { col: 3,  rows: 6,  rowStart: 1 },
-  { col: 4,  rows: 7,  rowStart: 0 },
-  { col: 5,  rows: 8,  rowStart: 0 },
-  { col: 6,  rows: 7,  rowStart: 0 },
-  { col: 7,  rows: 6,  rowStart: 1 },
-  { col: 8,  rows: 5,  rowStart: 2 },
-  { col: 9,  rows: 4,  rowStart: 3 },
-  { col: 10, rows: 3,  rowStart: 4 },
+const BOARD_ROWS = [
+  { cols: 3, colOff: 3 },  // row 0  (3 tiles, starts at col 3)
+  { cols: 4, colOff: 2 },  // row 1
+  { cols: 5, colOff: 2 },  // row 2
+  { cols: 6, colOff: 1 },  // row 3
+  { cols: 7, colOff: 1 },  // row 4
+  { cols: 8, colOff: 0 },  // row 5  (widest)
+  { cols: 7, colOff: 1 },  // row 6
+  { cols: 6, colOff: 1 },  // row 7
+  { cols: 5, colOff: 2 },  // row 8
+  { cols: 4, colOff: 2 },  // row 9
+  { cols: 3, colOff: 3 },  // row 10
 ];
-// Total = 3+4+5+6+7+8+7+6+5+4+3 = 58  (close to 64 — we
-// expand the two middle columns to 9 and 8 respectively)
-// Final layout used in buildTileMap() below.
 
 // Tile types
 const TILE_TYPE = { HIDDEN: 'hidden', NEUTRAL: 'neutral', FIRE: 'fire', WATER: 'water' };
@@ -51,74 +50,64 @@ const COLOR = {
   EMPIRE_AI:0xCC2020,
 };
 
-// ── Build the 64-tile map ────────────────────────────────────
+// ── Build the tile map ─────────────────────────────────────────────
 function buildTileMap() {
-  // Diamond shape: columns 0-10, row counts per design doc image
-  // We use axial coords q=col, r=row within that col
-  const colDef = [
-    { rows: 4,  rowOff: 4 },   // col 0
-    { rows: 5,  rowOff: 3 },   // col 1
-    { rows: 6,  rowOff: 2 },   // col 2
-    { rows: 7,  rowOff: 1 },   // col 3
-    { rows: 8,  rowOff: 0 },   // col 4
-    { rows: 9,  rowOff: 0 },   // col 5  (center)
-    { rows: 8,  rowOff: 0 },   // col 6
-    { rows: 7,  rowOff: 1 },   // col 7
-    { rows: 6,  rowOff: 2 },   // col 8
-    { rows: 5,  rowOff: 3 },   // col 9
-    { rows: 4,  rowOff: 4 },   // col 10
-  ];
-  // Total: 4+5+6+7+8+9+8+7+6+5+4 = 69  (trimmed to 64 by
-  // reducing col 5 to 8 rows and removing extras)
   const tiles = [];
   let id = 0;
-  colDef.forEach(({ rows, rowOff }, col) => {
-    for (let r = 0; r < rows; r++) {
+  BOARD_ROWS.forEach(({ cols, colOff }, row) => {
+    for (let c = 0; c < cols; c++) {
       tiles.push({
-        id:   id++,
-        col:  col,
-        row:  r + rowOff,
-        type: TILE_TYPE.HIDDEN,  // all start hidden
+        id,
+        row,
+        col: c + colOff,    // absolute column in the full grid
+        localCol: c,        // position within this row (0-based)
+        type: TILE_TYPE.HIDDEN,
         unit: null,
         highlight: HL.NONE,
       });
+      id++;
     }
   });
-  return tiles; // ~69 tiles; trim to 64 in scene if needed
+  return tiles;  // 58 tiles total
 }
 
-// ── Hex → pixel (flat-top) ───────────────────────────────────
+// ── Hex → pixel (POINTY-TOP) ───────────────────────────────────────
+// Pointy-top hexes: rows are horizontal, cols stagger vertically.
+// size = hex radius (center to corner)
 function hexToPixel(col, row, size) {
-  const w = size * 2;
-  const h = Math.sqrt(3) * size;
-  const x = col * (w * 0.75);
-  const y = row * h + (col % 2 === 1 ? h / 2 : 0);
+  const w = Math.sqrt(3) * size;   // pointy-top hex width
+  const h = size * 2;               // pointy-top hex height
+  const x = col * w + (row % 2 === 1 ? w / 2 : 0);
+  const y = row * h * 0.75;
   return { x, y };
 }
 
-// Hex corner points for flat-top hexagon
+// Hex corner points for POINTY-TOP hexagon (30° start)
 function hexCorners(cx, cy, size) {
   const pts = [];
   for (let i = 0; i < 6; i++) {
-    const deg = 60 * i;           // flat-top: start at 0°
+    const deg = 60 * i + 30;       // pointy-top: start at 30°
     const rad = (Math.PI / 180) * deg;
     pts.push(cx + size * Math.cos(rad), cy + size * Math.sin(rad));
   }
   return pts;
 }
 
-// Hex distance between two tiles (offset coords → axial)
+// Hex distance (offset "even-r" coords → cube coords)
+// For pointy-top hexes staggered by row (even-r offset)
 function hexDistance(t1, t2) {
-  // Convert offset (col, row) → axial (q, r)
   const toAxial = (col, row) => {
-    const q = col;
-    const r = row - (col - (col & 1)) / 2;
-    return { q, r };
+    const q = col - (row - (row & 1)) / 2;
+    const r = row;
+    return { q, r, s: -q - r };
   };
   const a1 = toAxial(t1.col, t1.row);
   const a2 = toAxial(t2.col, t2.row);
-  return Math.max(Math.abs(a1.q - a2.q), Math.abs(a1.r - a2.r),
-                  Math.abs((a1.q + a1.r) - (a2.q + a2.r)));
+  return Math.max(
+    Math.abs(a1.q - a2.q),
+    Math.abs(a1.r - a2.r),
+    Math.abs(a1.s - a2.s)
+  );
 }
 
 // ── Phaser Scene ─────────────────────────────────────────────
@@ -134,7 +123,7 @@ class HexBoardScene extends Phaser.Scene {
     this.tokenGfx    = new Map();             // unitId → Graphics
     this.selectedUnit = null;                 // { tileId, unitData }
     this.currentAction = null;                // 'move'|'melee'|'ranged'|'ability'
-    this.isMyTurn    = true;                  // toggled by Colyseus
+    this.isMyTurn    = false;                 // set by server on game_start/phase_change
     this.hexSize     = 36;                    // pixels, recalculated on resize
     this.originX     = 0;
     this.originY     = 0;
@@ -171,8 +160,7 @@ class HexBoardScene extends Phaser.Scene {
     // Emit ready event so index.html JS knows Phaser is up
     window.dispatchEvent(new CustomEvent('hexSceneReady', { detail: this }));
 
-    // Demo: seed a few tile types so the board isn't all grey at load
-    this._seedDemoTiles();
+    // Board starts fully hidden — server state will reveal tiles
   }
 
   // ── update ────────────────────────────────────────────────
@@ -190,18 +178,31 @@ class HexBoardScene extends Phaser.Scene {
     const W = canvas.width;
     const H = canvas.height;
 
-    // Fit the board into ~85% of canvas width / 90% height
-    const numCols = 11;
-    const numRows = 9;
-    const sizeByW = (W * 0.85) / (numCols * 1.5 + 0.5);
-    const sizeByH = (H * 0.88) / (numRows * Math.sqrt(3));
+    // Pointy-top hex dimensions:
+    //   width  = sqrt(3) * size
+    //   height = 2 * size
+    //   row pitch (vertical) = size * 1.5
+    //   col pitch (horizontal) = sqrt(3) * size
+    //   widest row has 8 cols + 0.5 stagger = 8.5 widths
+    //   11 rows tall = 10 * 1.5 * size + size = 16 * size
+
+    const maxCols = 8.5;   // widest row (row 5) with stagger offset
+    const numRows = 11;
+
+    const sizeByW = (W * 0.88) / (maxCols * Math.sqrt(3));
+    const sizeByH = (H * 0.88) / (numRows * 1.5 + 0.5);
     this.hexSize  = Math.floor(Math.min(sizeByW, sizeByH));
 
-    // Board bounding box
-    const bw = (numCols * 1.5 + 0.5) * this.hexSize * 2;
-    const bh = numRows * Math.sqrt(3) * this.hexSize;
-    this.originX = (W - bw) / 2 + this.hexSize;
-    this.originY = (H - bh) / 2 + this.hexSize;
+    const s = this.hexSize;
+    const hexW = Math.sqrt(3) * s;
+    const hexH = 2 * s;
+
+    // Total board pixel size
+    const bw = maxCols * hexW;
+    const bh = (numRows - 1) * hexH * 0.75 + hexH;
+
+    this.originX = (W - bw) / 2;
+    this.originY = (H - bh) / 2;
   }
 
   // ══════════════════════════════════════════════════════════
@@ -212,6 +213,7 @@ class HexBoardScene extends Phaser.Scene {
     // Clear any previous graphics
     this.tileGfx.forEach(g => g.destroy());
     this.tileGfx = [];
+    if (this._borderGfx) { this._borderGfx.destroy(); this._borderGfx = null; }
 
     this.tiles.forEach((tile, idx) => {
       const gfx = this.add.graphics();
@@ -261,15 +263,15 @@ class HexBoardScene extends Phaser.Scene {
       gfx.fillPoints(this._pts(pts), true);
     }
 
-    // Border
-    const borderColor = tile.type === TILE_TYPE.HIDDEN
-      ? COLOR.HIDDEN_BORDER : COLOR.BORDER;
-    gfx.lineStyle(1.5, borderColor, 0.9);
+    // Border — always draw grid lines so the diamond shape is visible
+    const borderAlpha = tile.type === TILE_TYPE.HIDDEN ? 0.35 : 0.85;
+    const borderColor = tile.type === TILE_TYPE.HIDDEN ? 0x555566 : 0x000000;
+    gfx.lineStyle(1, borderColor, borderAlpha);
     gfx.strokePoints(this._pts(pts), true);
 
     // Hover glow
     if (tile._hovered && tile.highlight === HL.NONE) {
-      gfx.lineStyle(2, 0xFFFFFF, 0.2);
+      gfx.lineStyle(2, 0xFFFFFF, 0.25);
       gfx.strokePoints(this._pts(pts), true);
     }
   }
@@ -512,11 +514,12 @@ class HexBoardScene extends Phaser.Scene {
 
   // Highlight all empty board positions for tile placement
   showPlacementHighlights(playerSide) {
-    // playerSide: 'bottom' or 'top' (which half of the board)
-    const midCol = 5;
+    // playerSide: 'right' or 'left' (which half of the board)
+    // In a sideways diamond, cols 0-3 = left side, cols 4-7 = right side
+    const midRow = 5;
     this.tiles.forEach(t => {
-      const onSide = playerSide === 'bottom' ? t.col >= midCol : t.col <= midCol;
-      if (onSide && !t.type || t.type === TILE_TYPE.HIDDEN) {
+      const onSide = playerSide === 'right' ? t.col >= midRow : t.col < midRow;
+      if (t.type === TILE_TYPE.HIDDEN) {
         t.highlight = HL.PLACEMENT;
       }
     });
@@ -624,16 +627,21 @@ class HexBoardScene extends Phaser.Scene {
   // ══════════════════════════════════════════════════════════
 
   _tileCenter(tile) {
-    const s  = this.hexSize;
-    const w  = s * 2;
-    const h  = Math.sqrt(3) * s;
-    const x  = this.originX + tile.col * w * 0.75;
-    const y  = this.originY + tile.row * h + (tile.col % 2 === 1 ? h / 2 : 0);
+    const s   = this.hexSize;
+    const hexW = Math.sqrt(3) * s;
+    const hexH = 2 * s;
+
+    // Pointy-top even-r offset:
+    // x = col * hexW + (row is odd ? hexW/2 : 0)
+    // y = row * hexH * 0.75
+    const x = this.originX + tile.col * hexW + (tile.row % 2 === 1 ? hexW / 2 : 0);
+    const y = this.originY + tile.row * hexH * 0.75;
     return { x, y };
   }
 
   _cornersFlat(tile) {
     const { x, y } = this._tileCenter(tile);
+    // Use hexSize - 1 for a 1px gap between tiles
     return hexCorners(x, y, this.hexSize - 1);
   }
 
@@ -647,22 +655,6 @@ class HexBoardScene extends Phaser.Scene {
     return this.gameState.units.find(u => u.tileId === tileId) || null;
   }
 
-  // ══════════════════════════════════════════════════════════
-  //  DEMO SEED  (remove when Colyseus provides real state)
-  // ══════════════════════════════════════════════════════════
-
-  _seedDemoTiles() {
-    // Reveal a handful of tiles so the board isn't all dark
-    const neutral = [2, 5, 8, 11, 14, 17, 20, 23, 26, 30, 33, 36, 40, 43];
-    const fire    = [3, 7, 28, 44];
-    const water   = [4, 9, 35, 50];
-
-    neutral.forEach(id => { if (this.tiles[id]) this.tiles[id].type = TILE_TYPE.NEUTRAL; });
-    fire   .forEach(id => { if (this.tiles[id]) this.tiles[id].type = TILE_TYPE.FIRE; });
-    water  .forEach(id => { if (this.tiles[id]) this.tiles[id].type = TILE_TYPE.WATER; });
-
-    this._refreshAll();
-  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -731,3 +723,4 @@ window.HexBridge = {
     if (window.HexScene) window.HexScene.placeTile(tileId, type);
   },
 };
+
