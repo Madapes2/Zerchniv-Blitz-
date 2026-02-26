@@ -2016,41 +2016,23 @@ const M = (() => {
     clearInterval(timerInt);
     TILES=[];
     GS={
-      phase:'draw', turn:1, ts:150,
+      phase:'setup', turn:1, ts:150,
       plHP:20, aiHP:20,
       ess:{n:2,f:0,w:0},
       hand:[], plUnits:[], aiUnits:[],
       plDeckU:15, plDeckB:10, aiDeckU:15, aiDeckB:10,
       plDisc:0, aiDisc:0,
       selUnit:null, selTile:null, actionMode:null,
-      aiEmpireTile:0, plEmpireTile:0,
+      aiEmpireTile:-1, plEmpireTile:-1,
       drawnThisTurn:false,
     };
     initBoard();
-
-    // Spawn 2 AI units near AI empire
-    const aiNearby=tilesInRange(GS.aiEmpireTile,2).filter(idx=>
-      idx!==GS.aiEmpireTile&&!TILES[idx].occupant).slice(0,2);
-    const aiCards=[CARDS.find(c=>c.id==='fireling'),CARDS.find(c=>c.id==='ocean-wanderer')];
-    aiNearby.forEach((t,i)=>{
-      if(!aiCards[i])return;
-      TILES[t].revealed=true;
-      GS.aiUnits.push({card:aiCards[i],tileIdx:t,hp:aiCards[i].hp,moved:false,attacked:false,deployRest:false});
-    });
-
-    // Deal 3 starting cards
-    const startPool=CARDS.filter(c=>c.t==='unit');
-    for(let i=0;i<3;i++) GS.hand.push(startPool[Math.floor(Math.random()*startPool.length)]);
+    // Units and hand come from server (Colyseus) — do NOT seed locally
 
     // Resize canvas & draw
     resizeCanvas();
     updateHUD(); updateEss(); updateDecks();
     updatePlPanel(); updateAIPanel(); renderHand();
-    setPhase('draw');
-    mlog('s','═══ MATCH BEGINS — Turn 1 ═══');
-    mlog('s','Draw Phase: click a deck (right side) to draw, then Main Phase to act.');
-    mtoast('Turn 1 — Draw Phase: click a deck to draw a card!');
-    startTimer();
   }
 
   function quit() {
@@ -2077,7 +2059,6 @@ function startAI(){
 }
 function launchMatch(){
   document.getElementById('mscr').classList.add('on');
-  M.init();
 }
 function cancelM(){clearInterval(matchInt);cl('mmod');}
 
