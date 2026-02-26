@@ -245,6 +245,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // The deck buttons in the right sidebar call M.drawCard('unit'|'blitz')
     // Route this through NET to the server
     M.drawCard = function (deckType) {
+      if (!M._isMyTurn()) { mtoast && mtoast('Not your turn!'); return; }
       if (typeof NET !== 'undefined') {
         NET.drawCard(deckType);
       }
@@ -252,6 +253,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // ── 14. END TURN (DOM button → server) ───────────────────
     M.endTurn = function () {
+      if (!M._isMyTurn()) { mtoast && mtoast('Not your turn!'); return; }
       if (typeof NET !== 'undefined') {
         NET.endTurn();
       }
@@ -266,6 +268,32 @@ document.addEventListener('DOMContentLoaded', function () {
     M.redraw = function () {
       if (window.HexScene) window.HexScene._refreshAll();
     };
+
+    // Rename "AI Commander" label to "Opponent" in the HUD
+    const aiNameEl = document.getElementById('m-ai-name');
+    if (aiNameEl && aiNameEl.textContent.includes('AI')) {
+      aiNameEl.textContent = 'Opponent';
+    }
+    // Also catch any element with text "AI Commander"
+    document.querySelectorAll('.mhud-lbl, .mbar-lbl, .emp-lbl').forEach(el => {
+      if (el.textContent.trim() === 'AI Commander') el.textContent = 'Opponent';
+    });
+
+    // Rename "AI Commander" → "Opponent" anywhere it appears in the HUD
+    document.querySelectorAll('*').forEach(el => {
+      if (el.children.length === 0 && el.textContent.trim() === 'AI Commander') {
+        el.textContent = 'Opponent';
+      }
+    });
+
+    // Rename "AI Commander" → "Opponent" anywhere in the HUD
+    setTimeout(() => {
+      document.querySelectorAll('*').forEach(el => {
+        if (!el.children.length && el.textContent.trim() === 'AI Commander') {
+          el.textContent = 'Opponent';
+        }
+      });
+    }, 500);
 
     console.log('[BRIDGE] M patched — all network.js → Phaser hooks active');
   }
@@ -398,12 +426,12 @@ document.addEventListener('DOMContentLoaded', function () {
     if (typeof NET === 'undefined') return;
 
     if (card.type === 'unit') {
-      // Unit cards need a spawn tile — tell Phaser to await a tile click
+      // Unit cards: tell Phaser to show deploy highlights and await tile click
       if (window.HexScene) {
-        window.HexScene.pendingDeployCard = card;
-        window.HexScene.currentAction = 'deploy';
+        window.HexScene.beginDeploy(card);
       }
-      M._toast?.('Click a spawn zone on the board to deploy ' + card.name);
+      // Show toast if available
+      if (typeof mtoast === 'function') mtoast('Select a tile to deploy ' + card.name);
     } else if (card.type === 'blitz') {
       NET.playBlitz(card.id);
     } else if (card.type === 'structure') {
