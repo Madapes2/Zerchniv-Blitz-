@@ -771,53 +771,7 @@
     logCombat('⬡ Unit deployed to board', 'a');
   });
 
-  // ── LISTEN FOR PHASER READY ───────────────────────────────────
-
-  window.addEventListener('hexSceneReady', function () {
-    console.log('[LOCAL ENGINE] HexScene ready — wiring hooks');
-    setTimeout(() => {
-      wireHooks();
-      // Auto-start the game as soon as Phaser is up and match screen is visible
-      const mscr = document.getElementById('mscr');
-      if (mscr && mscr.classList.contains('on') && !GS.started) {
-        startGame();
-      }
-    }, 200);
-  });
-
-  // ── ALSO HANDLE: match screen shown AFTER Phaser ready ──────
-  // Watch for mscr gaining 'on' class (user clicks Battle button)
-  const mscrObserver = new MutationObserver(function (mutations) {
-    for (const m of mutations) {
-      if (m.type === 'attributes' && m.attributeName === 'class') {
-        const el = m.target;
-        if (el.id === 'mscr' && el.classList.contains('on') && !GS.started) {
-          // Give Phaser a moment to render
-          setTimeout(() => {
-            wireHooks();
-            startGame();
-          }, 400);
-        }
-      }
-    }
-  });
-
-  document.addEventListener('DOMContentLoaded', function () {
-    const mscr = document.getElementById('mscr');
-    if (mscr) {
-      mscrObserver.observe(mscr, { attributes: true });
-      // If match screen is already visible (direct load)
-      if (mscr.classList.contains('on') && !GS.started) {
-        wireHooks();
-        setTimeout(startGame, 600);
-      }
-    }
-
-    // Patch buttons right away in case they're already in DOM
-    wireHooks();
-  });
-
-  // ── EXPOSE FOR DEBUGGING ─────────────────────────────────────
+  // ── EXPOSE FOR DEBUGGING (do this first so console can call ZB.startGame()) ──
   window.ZB = {
     GS,
     startGame,
@@ -826,10 +780,71 @@
     drawCard,
     handleEndTurn,
     handleDrawCard,
+    wireHooks,
     renderHand,
     refreshUnitSidebar,
   };
 
-  console.log('[LOCAL ENGINE] Loaded — waiting for match screen');
+  // ── ROBUST STARTUP: poll every 200ms until everything is ready ───
+  // Handles all race conditions:
+  //   - network.js shows #mscr before localEngine.js loads
+  //   - hexSceneReady fires before localEngine.js loads
+  //   - DOMContentLoaded already fired
+  //   - Any ordering of Colyseus join vs script load
+
+  function _tryStart() {
+    if (GS.started) return; // already running
+
+    const mscr = document.getElementById('mscr');
+    const mscrVisible = mscr && mscr.classList.contains('on');
+    const phaserReady = !!window.HexScene;
+
+    if (mscrVisible && phaserReady) {
+      console.log('[LOCAL ENGINE] Both conditions met — starting game');
+      wireHooks();
+      startGame();
+      return;
+    }
+
+    if (mscrVisible && !phaserReady) {
+      console.log('[LOCAL ENGINE] Match screen visible, waiting for Phaser...');
+    } else if (!mscrVisible && phaserReady) {
+      console.log('[LOCAL ENGINE] Phaser ready, waiting for match screen...');
+    }
+  }
+
+  // Poll every 250ms for up to 30 seconds
+  let _startAttempts = 0;
+  const _startPoller = setInterval(function () {
+    _startAttempts++;
+    _tryStart();
+    if (GS.started || _startAttempts > 120) {
+      clearInterval(_startPoller);
+      if (!GS.started) console.warn('[LOCAL ENGINE] Gave up waiting after 30s');
+    }
+  }, 250);
+
+  // Also hook events as backup (in case they fire after this script loads)
+  window.addEventListener('hexSceneReady', function () {
+    console.log('[LOCAL ENGINE] hexSceneReady event received');
+    setTimeout(_tryStart, 100);
+  });
+
+  // Watch for mscr getting 'on' class
+  const _mscrObserver = new MutationObserver(function (mutations) {
+    for (const mut of mutations) {
+      if (mut.attributeName === 'class' && mut.target.id === 'mscr') {
+        console.log('[LOCAL ENGINE] #mscr class changed:', mut.target.className);
+        setTimeout(_tryStart, 200);
+      }
+    }
+  });
+  const _mscr = document.getElementById('mscr');
+  if (_mscr) _mscrObserver.observe(_mscr, { attributes: true });
+
+  // Wire buttons immediately regardless (safe to call multiple times)
+  wireHooks();
+
+  console.log('[LOCAL ENGINE] Loaded — polling for start conditions (mscr.on + HexScene)');
 
 })();
