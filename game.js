@@ -123,7 +123,7 @@ class HexBoardScene extends Phaser.Scene {
     this.tokenGfx    = new Map();             // unitId → Graphics
     this.selectedUnit = null;                 // { tileId, unitData }
     this.currentAction = null;                // 'move'|'melee'|'ranged'|'ability'
-    this.isMyTurn    = false;                 // set by server on game_start/phase_change
+    this.isMyTurn    = false;                 // set by localEngine or server
     this.hexSize     = 36;                    // pixels, recalculated on resize
     this.originX     = 0;
     this.originY     = 0;
@@ -459,31 +459,39 @@ class HexBoardScene extends Phaser.Scene {
     const card = this.pendingDeployCard;
     if (!card) return;
 
-    // Send to server
+    // Send to server if connected
     if (typeof NET !== 'undefined') {
       NET.deployUnit(card.id, targetTile.id);
     } else if (window.networkModule && window.networkModule.isConnected()) {
       window.networkModule.deployUnit(card.id, targetTile.id);
     }
 
-    // Optimistic local preview — server will confirm via state update
-    const previewUnit = {
-      id: 'pending_' + card.id + '_' + Date.now(),
+    // Spawn unit token on the board (local, authoritative in offline mode)
+    const unitId = card._deployId || ('unit_' + card.id + '_' + Date.now());
+    const newUnit = {
+      id: unitId,
       tileId: targetTile.id,
       owner: 'player',
       name: card.name,
-      hp: card.hp,
-      maxHp: card.hp,
-      speed: card.speed || 1,
-      deployRest: true,   // just deployed — can't act this turn
+      hp: card.hp || 5,
+      maxHp: card.hp || 5,
+      defense: card.defense || 0,
+      melee: card.melee || 1,
+      rangedRange: card.rangedRange || 0,
+      speed: card.speed || 2,
+      size: card.size || 1,
+      deployRest: true,   // can't act this turn (just deployed)
       hasMoved: true,
       hasActed: true,
     };
-    this.gameState.units.push(previewUnit);
-    this._spawnToken(previewUnit);
+    this.gameState.units.push(newUnit);
+    this._spawnToken(newUnit);
 
     this.pendingDeployCard = null;
     this._clearSelection();
+
+    // Notify local engine that a unit was deployed
+    window.dispatchEvent(new CustomEvent('unitDeployed', { detail: newUnit }));
   }
 
   // ══════════════════════════════════════════════════════════
@@ -601,9 +609,14 @@ class HexBoardScene extends Phaser.Scene {
     if (empire) {
       this.showDeployHighlights(empire.tileId);
     } else {
-      // Fallback: highlight all empty revealed tiles
+      // No empire placed yet — highlight revealed tiles in the player's half
+      // Player side = right half (col >= 5 in a sideways diamond)
+      this._clearHighlights();
+      const midRow = Math.floor(this.tiles.reduce((mx,t) => Math.max(mx, t.row), 0) / 2);
       this.tiles.forEach(t => {
-        if (!this._unitAt(t.id) && t.type !== TILE_TYPE.HIDDEN) t.highlight = HL.PLACEMENT;
+        if (!this._unitAt(t.id) && t.type !== 'hidden') {
+          t.highlight = HL.PLACEMENT;
+        }
       });
       this._refreshAll();
     }
