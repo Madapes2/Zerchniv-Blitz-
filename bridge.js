@@ -566,6 +566,35 @@ document.addEventListener('DOMContentLoaded', function () {
 (function () {
   'use strict';
 
+  // ── ROOM CAPTURE — runs immediately on script load ────────────
+  // Patch Colyseus.Client.prototype NOW before network.js calls joinOrCreate.
+  // Load order: Colyseus SDK → network.js → bridge.js
+  // network.js calls joinOrCreate when player clicks Battle!, which happens
+  // AFTER page load, so this patch fires in time.
+  (function _patchColyseus() {
+    if (!window.Colyseus || !window.Colyseus.Client) {
+      setTimeout(_patchColyseus, 50);
+      return;
+    }
+    const proto = window.Colyseus.Client.prototype;
+    if (proto._zbPatched) return;
+    proto._zbPatched = true;
+
+    ['joinOrCreate', 'join', 'create', 'joinById', 'reconnect'].forEach(method => {
+      if (!proto[method]) return;
+      const orig = proto[method];
+      proto[method] = async function(...args) {
+        const room = await orig.apply(this, args);
+        if (room && !window._zbRoom) {
+          window._zbRoom = room;
+          console.log('[ZB] Room captured via', method, ':', room.roomId, room.sessionId);
+        }
+        return room;
+      };
+    });
+    console.log('[ZB] Colyseus.Client patched for room capture');
+  })();
+
   // ── CLIENT STATE (render-only, never authoritative) ───────────
   const CS = {
     mySeat:        null,   // sessionId assigned by server
@@ -608,11 +637,27 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function _getRoom() {
-    // Try every known location the room might be stored
-    return window._zbRoom          // our captured reference
-        || window.NET?._room       // if NET exposes it
-        || window.room             // direct global
-        || null;
+    // Already captured
+    if (window._zbRoom) return window._zbRoom;
+
+    // network.js stores room privately — try to find it by scanning NET object
+    if (window.NET) {
+      for (const key of Object.keys(window.NET)) {
+        const val = window.NET[key];
+        if (val && typeof val === 'object' && typeof val.send === 'function' && val.roomId) {
+          window._zbRoom = val;
+          console.log('[ZB] Room found on NET.' + key);
+          return val;
+        }
+      }
+      // Try private _room via property access (works if not truly private)
+      if (window.NET._room) { window._zbRoom = window.NET._room; return window._zbRoom; }
+    }
+
+    // Fallback: direct global
+    if (window.room && typeof window.room.send === 'function') return window.room;
+
+    return null;
   }
 
   // ── TOAST / LOG ───────────────────────────────────────────────
@@ -1383,26 +1428,6 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
 
-  function _interceptColyseusRoom() {
-    if (window.Colyseus && window.Colyseus.Client) {
-      const proto = window.Colyseus.Client.prototype;
-      if (proto.joinOrCreate && !proto._zbPatched) {
-        const orig = proto.joinOrCreate;
-        proto.joinOrCreate = async function(...args) {
-          const room = await orig.apply(this, args);
-          if (room) {
-            window._zbRoom = room;
-            console.log('[SERVER CLIENT] Room captured:', room.roomId, room.sessionId);
-          }
-          return room;
-        };
-        proto._zbPatched = true;
-        console.log('[SERVER CLIENT] Colyseus patched for room capture');
-      }
-    } else {
-      setTimeout(_interceptColyseusRoom, 100);
-    }
-  }
 
   function _installHooks() {
     if (typeof M === 'undefined') {
@@ -1415,6 +1440,9 @@ document.addEventListener('DOMContentLoaded', function () {
     // a Colyseus.Room. We intercept at the prototype level so any room
     // created anywhere is captured automatically.
     _interceptColyseusRoom();
+
+    // Also patch Room.prototype.send to sniff room reference
+    _sniffRoomFromSend();
 
     const _prevInit = M.initFromServer;
     M.initFromServer = function (state, seat) {
