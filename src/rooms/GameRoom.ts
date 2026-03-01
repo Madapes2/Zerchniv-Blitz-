@@ -95,8 +95,13 @@ export class GameRoom extends Room<GameRoomState> {
 
     // Set tile budgets (19 neutral, 10 elemental per player for 58-tile board)
     // 19 neutral + 10 elemental (5 fire + 5 water) per player for 58-tile board
-    player.neutralTilesRemaining   = (typeof NEUTRAL_TILES_PER_PLAYER   !== 'undefined') ? NEUTRAL_TILES_PER_PLAYER   : 19;
-    player.elementalTilesRemaining = (typeof ELEMENTAL_TILES_PER_PLAYER  !== 'undefined') ? ELEMENTAL_TILES_PER_PLAYER  : 10;
+    // Guard: only assign if the schema field exists on PlayerState
+    if ('neutralTilesRemaining'   in player) player.neutralTilesRemaining   = (typeof NEUTRAL_TILES_PER_PLAYER   !== 'undefined') ? NEUTRAL_TILES_PER_PLAYER   : 19;
+    if ('elementalTilesRemaining' in player) player.elementalTilesRemaining = (typeof ELEMENTAL_TILES_PER_PLAYER  !== 'undefined') ? ELEMENTAL_TILES_PER_PLAYER  : 10;
+    // Store in a side-channel map if schema fields are missing
+    (this as any)._tileBudgets = (this as any)._tileBudgets || new Map();
+    const budget = { neutral: 19, elemental: 10 };
+    (this as any)._tileBudgets.set(client.sessionId, budget);
 
     this.gs.players.set(client.sessionId, player);
     addLog(this.gs, `${player.displayName} joined as ${seat}.`);
@@ -194,19 +199,24 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   private serializePlayerForSelf(p: PlayerState) {
-    return {
-      username:        p.displayName,
-      hp:              p.empire?.currentHp ?? 20,
-      essence:         { n: p.essence?.neutral ?? 0, f: p.essence?.fire ?? 0, w: p.essence?.water ?? 0 },
-      hand:            Array.from(p.hand),
-      unitDeckCount:   p.unitDeck.length,
-      blitzDeckCount:  p.blitzDeck.length,
-      discardCount:    p.discardPile.length,
-      neutralTilesRemaining:   p.neutralTilesRemaining,
-      elementalTilesRemaining: p.elementalTilesRemaining,
-      tileSetupComplete: p.tileSetupComplete,
-      empireSet:       p.empireSet,
-    };
+    try {
+      return {
+        username:        p.displayName,
+        hp:              p.empire?.currentHp ?? 20,
+        essence:         { n: p.essence?.neutral ?? 0, f: p.essence?.fire ?? 0, w: p.essence?.water ?? 0 },
+        hand:            Array.from(p.hand || []),
+        unitDeckCount:   p.unitDeck?.length ?? 0,
+        blitzDeckCount:  p.blitzDeck?.length ?? 0,
+        discardCount:    p.discardPile?.length ?? 0,
+        neutralTilesRemaining:   p.neutralTilesRemaining ?? 19,
+        elementalTilesRemaining: p.elementalTilesRemaining ?? 10,
+        tileSetupComplete: p.tileSetupComplete ?? false,
+        empireSet:       p.empireSet ?? false,
+      };
+    } catch(e) {
+      console.error('[GameRoom] serializePlayerForSelf error:', e);
+      return { username: p?.displayName || 'Player', hp: 20, essence: {n:0,f:0,w:0}, hand: [], unitDeckCount: 0, blitzDeckCount: 0, discardCount: 0 };
+    }
   }
 
   private serializePlayerForOpponent(p: PlayerState) {
@@ -262,10 +272,11 @@ export class GameRoom extends Room<GameRoomState> {
   // ============================================================
 
   private startGame() {
+    try {
     const playerIds = Array.from(this.gs.players.keys());
     const flip = Math.random() < 0.5;
     this.gs.activePlayerId = flip ? playerIds[0] : playerIds[1];
-    this.gs.currentPhase   = Phase.SETUP_TILES;
+    this.gs.currentPhase   = String(Phase.SETUP_TILES || "SETUP_TILES");
     this.gs.roundNumber    = 1;
 
     addLog(this.gs, `Game started! ${this.getPlayerName(this.gs.activePlayerId)} places tiles first.`);
@@ -289,6 +300,7 @@ export class GameRoom extends Room<GameRoomState> {
         }
       });
     });
+    } catch(e) { console.error('[GameRoom] startGame error:', e); }
   }
 
   // ============================================================
@@ -329,9 +341,11 @@ export class GameRoom extends Room<GameRoomState> {
       return;
     }
 
-    switch (this.gs.currentPhase) {
+    const phaseStr = String(this.gs.currentPhase).toUpperCase().replace('PHASE.', '');
+    switch (phaseStr) {
 
-      case Phase.SETUP_TILES:
+      case String(Phase.SETUP_TILES).toUpperCase():
+      case 'SETUP_TILES':
         if (playerId !== this.gs.activePlayerId) {
           client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn to place tiles." });
           return;
@@ -340,15 +354,18 @@ export class GameRoom extends Room<GameRoomState> {
         if (msg.type === "end_tile_placement") this.handleEndTilePlacement(client);
         break;
 
-      case Phase.SETUP_EMPIRE:
+      case String(Phase.SETUP_EMPIRE).toUpperCase():
+      case 'SETUP_EMPIRE':
         if (msg.type === "place_empire") this.handlePlaceEmpire(client, (msg as any).tileId);
         break;
 
-      case Phase.STANDBY:
+      case String(Phase.STANDBY).toUpperCase():
+      case 'STANDBY':
         // Server-driven — no client actions during standby
         break;
 
-      case Phase.DRAW:
+      case String(Phase.DRAW).toUpperCase():
+      case 'DRAW':
         if (playerId !== this.gs.activePlayerId) {
           client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
           return;
@@ -356,7 +373,8 @@ export class GameRoom extends Room<GameRoomState> {
         if (msg.type === "draw_card") this.handleDrawCard(client, (msg as any).deck ?? (msg as any).deckType);
         break;
 
-      case Phase.MAIN:
+      case String(Phase.MAIN).toUpperCase():
+      case 'MAIN':
         if (playerId !== this.gs.activePlayerId) {
           client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
           return;
@@ -383,7 +401,8 @@ export class GameRoom extends Room<GameRoomState> {
           this.handleEndTurn(client);
         break;
 
-      case Phase.END:
+      case String(Phase.END).toUpperCase():
+      case 'END':
         // End phase is server-driven
         break;
     }
@@ -402,11 +421,16 @@ export class GameRoom extends Room<GameRoomState> {
       return;
     }
 
-    if (tileType === "neutral" && player.neutralTilesRemaining <= 0) {
+    // Use schema fields if available, otherwise use side-channel budget
+    const budget2 = (this as any)._tileBudgets?.get(client.sessionId) || { neutral: 99, elemental: 99 };
+    const neutralLeft   = ('neutralTilesRemaining'   in player) ? player.neutralTilesRemaining   : budget2.neutral;
+    const elementalLeft = ('elementalTilesRemaining' in player) ? player.elementalTilesRemaining : budget2.elemental;
+
+    if (tileType === "neutral" && neutralLeft <= 0) {
       client.send("error", { code: "NO_TILES", message: "No neutral tiles remaining." });
       return;
     }
-    if ((tileType === "fire" || tileType === "water") && player.elementalTilesRemaining <= 0) {
+    if ((tileType === "fire" || tileType === "water") && elementalLeft <= 0) {
       client.send("error", { code: "NO_TILES", message: "No elemental tiles remaining." });
       return;
     }
@@ -418,8 +442,16 @@ export class GameRoom extends Room<GameRoomState> {
     tile.ownedBy  = client.sessionId;
     this.gs.tiles.set(tileId, tile);
 
-    if (tileType === "neutral") player.neutralTilesRemaining--;
-    else                        player.elementalTilesRemaining--;
+    // Decrement whichever storage is available
+    if ('neutralTilesRemaining' in player) {
+      if (tileType === "neutral") player.neutralTilesRemaining--;
+      else player.elementalTilesRemaining--;
+    } else {
+      const b = (this as any)._tileBudgets?.get(client.sessionId);
+      if (b) { if (tileType === "neutral") b.neutral--; else b.elemental--; }
+    }
+    const remainingNeutral   = ('neutralTilesRemaining'   in player) ? player.neutralTilesRemaining   : ((this as any)._tileBudgets?.get(client.sessionId)?.neutral   ?? 0);
+    const remainingElemental = ('elementalTilesRemaining' in player) ? player.elementalTilesRemaining : ((this as any)._tileBudgets?.get(client.sessionId)?.elemental ?? 0);
 
     addLog(this.gs, `${player.displayName} placed ${tileType} tile at ${tileId}.`);
 
@@ -428,8 +460,8 @@ export class GameRoom extends Room<GameRoomState> {
       tileId,
       tileType,
       byPlayer: this.getSeat(client.sessionId),
-      neutralRemaining:   player.neutralTilesRemaining,
-      elementalRemaining: player.elementalTilesRemaining,
+      neutralRemaining:   remainingNeutral,
+      elementalRemaining: remainingElemental,
     });
   }
 
@@ -449,7 +481,7 @@ export class GameRoom extends Room<GameRoomState> {
       this.broadcastStateUpdate();
     } else {
       // Both done — move to empire placement
-      this.gs.currentPhase = Phase.SETUP_EMPIRE;
+      this.gs.currentPhase = String(Phase.SETUP_EMPIRE);
       addLog(this.gs, "Both players placed tiles. Now place your Empires.");
       this.broadcastPhaseChange();
       this.broadcastStateUpdate();
@@ -494,7 +526,7 @@ export class GameRoom extends Room<GameRoomState> {
   // ============================================================
 
   private startStandbyPhase() {
-    this.gs.currentPhase = Phase.STANDBY;
+    this.gs.currentPhase = String(Phase.STANDBY);
     const playerId = this.gs.activePlayerId;
     const player   = this.gs.players.get(playerId)!;
 
@@ -521,7 +553,7 @@ export class GameRoom extends Room<GameRoomState> {
 
     // Auto-advance to draw after 1.5s
     this.clock.setTimeout(() => {
-      this.gs.currentPhase = Phase.DRAW;
+      this.gs.currentPhase = String(Phase.DRAW);
       addLog(this.gs, `${player.displayName}'s Draw Phase.`);
       this.broadcastPhaseChange();
       this.broadcastStateUpdate();
@@ -562,7 +594,7 @@ export class GameRoom extends Room<GameRoomState> {
     });
 
     // Advance to main phase
-    this.gs.currentPhase = Phase.MAIN;
+    this.gs.currentPhase = String(Phase.MAIN);
     addLog(this.gs, `${player.displayName}'s Main Phase.`);
     this.broadcastPhaseChange();
     this.broadcastStateUpdate();
@@ -905,7 +937,7 @@ export class GameRoom extends Room<GameRoomState> {
 
   private handleEndTurn(client: Client) {
     addLog(this.gs, `${this.getPlayerName(client.sessionId)} ends turn.`);
-    this.gs.currentPhase = Phase.END;
+    this.gs.currentPhase = String(Phase.END);
     this.broadcastPhaseChange();
 
     // Advance round counter when p2 ends their turn
