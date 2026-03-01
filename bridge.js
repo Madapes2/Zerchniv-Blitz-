@@ -594,16 +594,25 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // ── SEND TO SERVER ────────────────────────────────────────────
-  // Routes through network.js's NET object or falls back to window.room
   function send(type, payload) {
-    const msg = { type, ...payload };
-    if (window.NET && window.NET._room) {
-      window.NET._room.send(type, payload);
-    } else if (window.room) {
-      window.room.send(type, payload);
+    const room = _getRoom();
+    if (room) {
+      try {
+        room.send(type, payload);
+      } catch(e) {
+        console.error('[SERVER CLIENT] send error:', e);
+      }
     } else {
       console.warn('[SERVER CLIENT] No room connection — cannot send:', type, payload);
     }
+  }
+
+  function _getRoom() {
+    // Try every known location the room might be stored
+    return window._zbRoom          // our captured reference
+        || window.NET?._room       // if NET exposes it
+        || window.room             // direct global
+        || null;
   }
 
   // ── TOAST / LOG ───────────────────────────────────────────────
@@ -1347,11 +1356,65 @@ document.addEventListener('DOMContentLoaded', function () {
   // We override that here to route into our onGameStart.
   // This runs after bridge.js DOMContentLoaded block completes.
 
+  function _interceptColyseusRoom() {
+    // Strategy 1: Patch Client.joinOrCreate to capture returned room
+    if (window.Colyseus && window.Colyseus.Client) {
+      const OrigClient = window.Colyseus.Client;
+      const origProto  = OrigClient.prototype;
+
+      // Wrap joinOrCreate
+      if (origProto.joinOrCreate && !origProto._zbPatched) {
+        const origJOC = origProto.joinOrCreate;
+        origProto.joinOrCreate = async function(...args) {
+          const room = await origJOC.apply(this, args);
+          if (room) {
+            window._zbRoom = room;
+            console.log('[SERVER CLIENT] Room captured via joinOrCreate:', room.roomId);
+          }
+          return room;
+        };
+        origProto._zbPatched = true;
+        console.log('[SERVER CLIENT] Colyseus.Client.joinOrCreate patched');
+      }
+    } else {
+      // Colyseus not loaded yet — try again
+      setTimeout(_interceptColyseusRoom, 100);
+    }
+  }
+
+
+  function _interceptColyseusRoom() {
+    if (window.Colyseus && window.Colyseus.Client) {
+      const proto = window.Colyseus.Client.prototype;
+      if (proto.joinOrCreate && !proto._zbPatched) {
+        const orig = proto.joinOrCreate;
+        proto.joinOrCreate = async function(...args) {
+          const room = await orig.apply(this, args);
+          if (room) {
+            window._zbRoom = room;
+            console.log('[SERVER CLIENT] Room captured:', room.roomId, room.sessionId);
+          }
+          return room;
+        };
+        proto._zbPatched = true;
+        console.log('[SERVER CLIENT] Colyseus patched for room capture');
+      }
+    } else {
+      setTimeout(_interceptColyseusRoom, 100);
+    }
+  }
+
   function _installHooks() {
     if (typeof M === 'undefined') {
       setTimeout(_installHooks, 100);
       return;
     }
+
+    // ── Intercept Colyseus room creation to capture room reference ──
+    // network.js creates the room via _client.joinOrCreate() which returns
+    // a Colyseus.Room. We intercept at the prototype level so any room
+    // created anywhere is captured automatically.
+    _interceptColyseusRoom();
 
     const _prevInit = M.initFromServer;
     M.initFromServer = function (state, seat) {
@@ -1361,8 +1424,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Hook state changes — network.js may expose room on window
     function _tryHookRoom() {
-      const room = window.NET?._room || window.room;
+      const room = window._zbRoom || window.NET?._room || window.room;
       if (room && !room._serverClientHooked) {
+        window._zbRoom = room; // ensure captured
         room._serverClientHooked = true;
         room.onStateChange(state => onStateChange(state));
 
