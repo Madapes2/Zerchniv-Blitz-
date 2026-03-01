@@ -597,8 +597,10 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // ── CLIENT STATE (render-only, never authoritative) ───────────
   const CS = {
-    mySeat:        null,   // sessionId assigned by server
-    activePlayerId: null,  // sessionId of whoever's turn it is
+    mySeat:        null,   // "p1" or "p2" seat label
+    mySessionId:   null,   // actual Colyseus sessionId
+    activePlayerId: null,  // "p1" or "p2" seat label (from phase_change broadcasts)
+    activeSessionId: null, // sessionId of active player (from schema auto-sync)
     currentPhase:  null,   // Phase enum string from server
     myHand:        [],     // card ids in my hand (private, sent directly)
     tiles:         {},     // tileId → { tileType, revealed, occupiedBy }
@@ -638,7 +640,14 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function _getRoom() {
     // Already captured
-    if (window._zbRoom) return window._zbRoom;
+    if (window._zbRoom) {
+      // Also store sessionId the first time we see it
+      if (!CS.mySessionId && window._zbRoom.sessionId) {
+        CS.mySessionId = window._zbRoom.sessionId;
+        console.log('[ZB] My sessionId:', CS.mySessionId);
+      }
+      return window._zbRoom;
+    }
 
     // network.js stores room privately — try to find it by scanning NET object
     if (window.NET) {
@@ -1191,8 +1200,11 @@ document.addEventListener('DOMContentLoaded', function () {
   function onGameStart(seat, initialState) {
     CS.mySeat = seat;
     window._zbMySeat = seat;
-
-    console.log('[SERVER CLIENT] onGameStart called — seat:', seat);
+    // Capture sessionId from room if available
+    if (window._zbRoom && window._zbRoom.sessionId) {
+      CS.mySessionId = window._zbRoom.sessionId;
+    }
+    console.log('[SERVER CLIENT] onGameStart called — seat:', seat, '| sessionId:', CS.mySessionId);
     console.log('[SERVER CLIENT] initialState:', JSON.stringify(initialState));
     logCombat('⬡ Game started — placing tiles', 's');
 
@@ -1282,14 +1294,26 @@ document.addEventListener('DOMContentLoaded', function () {
     // Called when Colyseus patches arrive
     if (!state) return;
 
-    // Phase / active player — server may use either field name
+    // Phase / active player — schema sends sessionId; broadcasts send seat label
     const incomingPhase  = state.currentPhase ?? state.phase;
-    const incomingActive = state.activePlayerId ?? state.activePlayer;
+    const incomingActive = state.activePlayerId ?? state.activePlayer; // may be sessionId
+
     if (incomingPhase !== undefined) {
       const phaseChanged = incomingPhase !== CS.currentPhase;
       CS.currentPhase = incomingPhase;
-      if (incomingActive) CS.activePlayerId = incomingActive;
-      if (phaseChanged) onPhaseChange(incomingPhase, incomingActive);
+
+      // Resolve active player to a seat label
+      let activeSeat = incomingActive;
+      if (incomingActive && incomingActive.length > 4) {
+        // Looks like a sessionId — convert to seat using seatMap
+        // We know our own sessionId → if it matches, we're active
+        const myId = CS.mySessionId || window._zbRoom?.sessionId;
+        activeSeat = (incomingActive === myId) ? CS.mySeat : (CS.mySeat === 'p1' ? 'p2' : 'p1');
+        CS.activeSessionId = incomingActive;
+      }
+      if (activeSeat) CS.activePlayerId = activeSeat;
+
+      if (phaseChanged) onPhaseChange(incomingPhase, activeSeat);
       else { updateTurnBanner(); updatePhaseUI(incomingPhase); }
     }
 
@@ -1452,6 +1476,10 @@ document.addEventListener('DOMContentLoaded', function () {
       const room = window._zbRoom || window.NET?._room || window.room;
       if (room && !room._serverClientHooked) {
         window._zbRoom = room; // ensure captured
+        if (!CS.mySessionId && room.sessionId) {
+          CS.mySessionId = room.sessionId;
+          console.log('[ZB] SessionId set in hookRoom:', CS.mySessionId);
+        }
         room._serverClientHooked = true;
         room.onStateChange(state => onStateChange(state));
 
