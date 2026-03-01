@@ -209,18 +209,20 @@ document.addEventListener('DOMContentLoaded', function () {
       if (mscr && !mscr.classList.contains('on')) mscr.classList.add('on');
 
       // Hand off to server client
+      // Store args so ZB can pick them up even if it loads after this fires
+      window._zbPendingStart = { seat, state };
+      console.log('[BRIDGE] Queued game start for ZB, seat:', seat, 'state keys:', Object.keys(state || {}));
+
       function _tryHandoff() {
-        if (window.ZB && window.ZB.onGameStart) {
-          if (window.HexScene) {
-            window.ZB.onGameStart(seat, state);
-          } else {
-            setTimeout(_tryHandoff, 150);
-          }
+        console.log('[BRIDGE] _tryHandoff attempt — ZB:', !!window.ZB, 'HexScene:', !!window.HexScene);
+        if (window.ZB && window.ZB.onGameStart && window.HexScene) {
+          window._zbPendingStart = null;
+          window.ZB.onGameStart(seat, state);
         } else {
           setTimeout(_tryHandoff, 150);
         }
       }
-      setTimeout(_tryHandoff, 200);
+      setTimeout(_tryHandoff, 100);
     };
 
     // ── 11. COMBAT FLASH ─────────────────────────────────────
@@ -1115,7 +1117,8 @@ document.addEventListener('DOMContentLoaded', function () {
     CS.mySeat = seat;
     window._zbMySeat = seat;
 
-    console.log('[SERVER CLIENT] Game start — my seat:', seat);
+    console.log('[SERVER CLIENT] onGameStart called — seat:', seat);
+    console.log('[SERVER CLIENT] initialState:', JSON.stringify(initialState));
     logCombat('⬡ Game started — placing tiles', 's');
 
     // Read active player from state — server uses "activePlayer" (seat label)
@@ -1124,6 +1127,7 @@ document.addEventListener('DOMContentLoaded', function () {
                     || initialState?.activePlayerId
                     || 'p1';
     CS.activePlayerId = activeSeat;
+    console.log('[SERVER CLIENT] activeSeat set to:', activeSeat, '| isMyTurn:', seat === activeSeat);
 
     // Resize Phaser now that match screen is visible
     setTimeout(_resizePhaser, 200);
@@ -1286,7 +1290,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
   }
 
-  // ── EXPOSE ───────────────────────────────────────────────────
+  // ── EXPOSE — set immediately so bridge._tryHandoff can find it ──
   window.ZB = {
     CS,
     isMyTurn,
@@ -1298,6 +1302,14 @@ document.addEventListener('DOMContentLoaded', function () {
     renderHand,
     wireButtons,
   };
+
+  // Pick up any game_start that fired before this script finished loading
+  if (window._zbPendingStart) {
+    console.log('[SERVER CLIENT] Picking up pending game start');
+    const { seat, state } = window._zbPendingStart;
+    window._zbPendingStart = null;
+    setTimeout(() => onGameStart(seat, state), 50);
+  }
 
   // ── INIT: hook into bridge.js M.initFromServer ────────────────
   // bridge.js patches M.initFromServer and calls it with (state, seat).
