@@ -338,6 +338,38 @@ export class GameRoom extends Room<GameRoomState> {
       return;
     }
 
+    // State sync request — client can ask for current state at any time (e.g. after reconnect)
+    if (msg.type === "request_state") {
+      try {
+        const seat    = this.getSeat(client.sessionId);
+        const myId    = client.sessionId;
+        const oppSeat = this.getOtherSeat(seat);
+        const oppId   = this.getSessionBySeat(oppSeat);
+        const me      = this.gs.players.get(myId);
+        const opp     = oppId ? this.gs.players.get(oppId) : null;
+        client.send("state_update", {
+          state: {
+            phase:        this.phaseToString(this.gs.currentPhase),
+            turn:         this.gs.roundNumber,
+            activePlayer: this.getActiveSeat(),
+            players: {
+              [seat]:    me  ? this.serializePlayerForSelf(me)      : null,
+              [oppSeat]: opp ? this.serializePlayerForOpponent(opp) : null,
+            },
+            units:   this.serializeUnits(seat),
+            tiles:   this.serializeTiles(),
+            empires: this.serializeEmpires(),
+          }
+        });
+        client.send("phase_change", {
+          phase:        this.phaseToString(this.gs.currentPhase),
+          turn:         this.gs.roundNumber,
+          activePlayer: this.getActiveSeat(),
+        });
+      } catch(e) { console.error("[GameRoom] request_state error:", e); }
+      return;
+    }
+
     // Info requests — always allowed
     if (msg.type === "request_valid_moves" || msg.type === "request_moves") {
       this.sendValidMoves(client, (msg as any).unitId);
