@@ -160,29 +160,38 @@ export class GameRoom extends Room<GameRoomState> {
 
   /** Send a full state_update snapshot to both clients. */
   private broadcastStateUpdate() {
-    const activeSeat = this.getActiveSeat();
-    this.clients.forEach(client => {
-      const mySeat  = this.getSeat(client.sessionId);
-      const myId    = client.sessionId;
-      const oppId   = this.getSessionBySeat(this.getOtherSeat(mySeat));
-      const me      = this.gs.players.get(myId);
-      const opp     = this.gs.players.get(oppId);
+    try {
+      const activeSeat = this.getActiveSeat();
+      this.clients.forEach(client => {
+        try {
+          const mySeat  = this.getSeat(client.sessionId);
+          if (!mySeat) { console.error('[GameRoom] broadcastStateUpdate: no seat for', client.sessionId); return; }
+          const myId    = client.sessionId;
+          const oppId   = this.getSessionBySeat(this.getOtherSeat(mySeat));
+          const me      = this.gs.players.get(myId);
+          const opp     = oppId ? this.gs.players.get(oppId) : null;
 
-      client.send("state_update", {
-        state: {
-          phase:        this.phaseToString(this.gs.currentPhase),
-          turn:         this.gs.roundNumber,
-          activePlayer: activeSeat,
-          players: {
-            [mySeat]: me ? this.serializePlayerForSelf(me) : null,
-            [this.getOtherSeat(mySeat)]: opp ? this.serializePlayerForOpponent(opp) : null,
-          },
-          units:      this.serializeUnits(mySeat),
-          tiles:      this.serializeTiles(),
-          empires:    this.serializeEmpires(),
+          client.send("state_update", {
+            state: {
+              phase:        this.phaseToString(this.gs.currentPhase),
+              turn:         this.gs.roundNumber,
+              activePlayer: activeSeat,
+              players: {
+                [mySeat]: me ? this.serializePlayerForSelf(me) : null,
+                [this.getOtherSeat(mySeat)]: opp ? this.serializePlayerForOpponent(opp) : null,
+              },
+              units:      this.serializeUnits(mySeat),
+              tiles:      this.serializeTiles(),
+              empires:    this.serializeEmpires(),
+            }
+          });
+        } catch(innerE) {
+          console.error('[GameRoom] broadcastStateUpdate inner error for client', client.sessionId, ':', innerE);
         }
       });
-    });
+    } catch(e) {
+      console.error('[GameRoom] broadcastStateUpdate error:', e);
+    }
   }
 
   private phaseToString(phase: any): string {
@@ -466,25 +475,32 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   private handleEndTilePlacement(client: Client) {
-    const player = this.gs.players.get(client.sessionId)!;
-    player.tileSetupComplete = true;
-    addLog(this.gs, `${player.displayName} finished placing tiles.`);
+    try {
+      const player = this.gs.players.get(client.sessionId);
+      if (!player) { console.error('[GameRoom] handleEndTilePlacement: player not found', client.sessionId); return; }
 
-    const otherPlayerId = this.getOtherPlayerId(client.sessionId);
-    const otherPlayer   = this.gs.players.get(otherPlayerId);
+      player.tileSetupComplete = true;
+      addLog(this.gs, `${player.displayName} finished placing tiles.`);
 
-    if (!otherPlayer?.tileSetupComplete) {
-      // Pass tile placement turn to other player
-      this.gs.activePlayerId = otherPlayerId;
-      addLog(this.gs, `${this.getPlayerName(otherPlayerId)} now places their tiles.`);
-      this.broadcastPhaseChange();
-      this.broadcastStateUpdate();
-    } else {
-      // Both done — move to empire placement
-      this.gs.currentPhase = String(Phase.SETUP_EMPIRE);
-      addLog(this.gs, "Both players placed tiles. Now place your Empires.");
-      this.broadcastPhaseChange();
-      this.broadcastStateUpdate();
+      const otherPlayerId = this.getOtherPlayerId(client.sessionId);
+      if (!otherPlayerId) { console.error('[GameRoom] handleEndTilePlacement: no otherPlayerId'); return; }
+      const otherPlayer = this.gs.players.get(otherPlayerId);
+
+      if (!otherPlayer?.tileSetupComplete) {
+        // Pass tile placement turn to other player
+        this.gs.activePlayerId = otherPlayerId;
+        addLog(this.gs, `${this.getPlayerName(otherPlayerId)} now places their tiles.`);
+        this.broadcastPhaseChange();
+        this.broadcastStateUpdate();
+      } else {
+        // Both done — move to empire placement
+        this.gs.currentPhase = String(Phase.SETUP_EMPIRE);
+        addLog(this.gs, "Both players placed tiles. Now place your Empires.");
+        this.broadcastPhaseChange();
+        this.broadcastStateUpdate();
+      }
+    } catch(e) {
+      console.error('[GameRoom] handleEndTilePlacement error:', e);
     }
   }
 
