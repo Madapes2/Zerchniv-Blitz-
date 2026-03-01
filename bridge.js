@@ -206,15 +206,20 @@ document.addEventListener('DOMContentLoaded', function () {
         mscr.classList.add('on');
       }
 
-      // Give Phaser a moment to size itself, then apply state
-      setTimeout(() => {
-        if (state) {
-          // Resize Phaser to fit the now-visible canvas
-          _resizePhaser();
-          // Apply full initial state
-          if (window.HexScene) window.HexScene.applyServerState(state);
+      // Trigger localEngine.startGame() from here so the seat is set first.
+      // Retry until HexScene is ready (Phaser may still be initialising).
+      function _tryStartWithSeat() {
+        if (window.ZB && window.ZB.GS && !window.ZB.GS.started) {
+          window.ZB.GS.mySeat = seat;  // guarantee seat is set
+          if (window.HexScene) {
+            window.ZB.wireHooks && window.ZB.wireHooks();
+            window.ZB.startGame();
+          } else {
+            setTimeout(_tryStartWithSeat, 150);
+          }
         }
-      }, 200);
+      }
+      setTimeout(_tryStartWithSeat, 200);
     };
 
     // ── 11. COMBAT FLASH ─────────────────────────────────────
@@ -1413,9 +1418,12 @@ document.addEventListener('DOMContentLoaded', function () {
 
   function _tryStart() {
     if (GS.started) return;
+    // If network.js already called M.initFromServer (window._zbMySeat is set),
+    // let that handler call startGame() — don't start here or we double-deal.
+    if (window._zbMySeat !== undefined) return;
     const mscr = document.getElementById('mscr');
     if (mscr && mscr.classList.contains('on') && window.HexScene) {
-      console.log('[LOCAL ENGINE v2] Starting — seat:', GS.mySeat);
+      console.log('[LOCAL ENGINE v2] Starting (no network) — seat:', GS.mySeat);
       wireHooks();
       _hookPhaserTileClick();
       startGame();
