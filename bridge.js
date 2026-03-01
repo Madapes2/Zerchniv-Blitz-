@@ -187,6 +187,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
       // During Draw phase, highlight deck buttons to prompt drawing
       _updateDrawPhaseUI(phase, isMyTurn);
+
+      // During setup phases, render the tile/empire placement bar
+      if (phase === 'setup_tiles' || phase === 'setup_empire') {
+        if (window.ZB && window.ZB.renderHand) window.ZB.renderHand();
+      }
     };
 
     // ── 10. INIT FROM SERVER ─────────────────────────────────
@@ -195,31 +200,27 @@ document.addEventListener('DOMContentLoaded', function () {
     M.initFromServer = function (state, seat) {
       if (_origInitFromServer) _origInitFromServer.call(M, state, seat);
 
-      // Expose seat to localEngine so turn order is correct per-client
+      // Expose seat to server client
       window._zbMySeat = seat;
-      if (window.ZB && window.ZB.GS) window.ZB.GS.mySeat = seat;
       console.log('[BRIDGE] My seat:', seat);
 
-      // Show match screen if not already visible
+      // Show match screen
       const mscr = document.getElementById('mscr');
-      if (mscr && !mscr.classList.contains('on')) {
-        mscr.classList.add('on');
-      }
+      if (mscr && !mscr.classList.contains('on')) mscr.classList.add('on');
 
-      // Trigger localEngine.startGame() from here so the seat is set first.
-      // Retry until HexScene is ready (Phaser may still be initialising).
-      function _tryStartWithSeat() {
-        if (window.ZB && window.ZB.GS && !window.ZB.GS.started) {
-          window.ZB.GS.mySeat = seat;  // guarantee seat is set
+      // Hand off to server client
+      function _tryHandoff() {
+        if (window.ZB && window.ZB.onGameStart) {
           if (window.HexScene) {
-            window.ZB.wireHooks && window.ZB.wireHooks();
-            window.ZB.startGame();
+            window.ZB.onGameStart(seat, state);
           } else {
-            setTimeout(_tryStartWithSeat, 150);
+            setTimeout(_tryHandoff, 150);
           }
+        } else {
+          setTimeout(_tryHandoff, 150);
         }
       }
-      setTimeout(_tryStartWithSeat, 200);
+      setTimeout(_tryHandoff, 200);
     };
 
     // ── 11. COMBAT FLASH ─────────────────────────────────────
@@ -546,127 +547,64 @@ document.addEventListener('DOMContentLoaded', function () {
 
 
 /* ═══════════════════════════════════════════════════════════════
-   LOCAL GAME ENGINE v2 — embedded in bridge.js
-   To use Colyseus server: remove from here to end of file.
+   SERVER CLIENT — all game state is authoritative on Colyseus.
    ═══════════════════════════════════════════════════════════════ */
 
-
 /* ═══════════════════════════════════════════════════════════════
-   LOCAL GAME ENGINE v2 — embedded in bridge.js
-   Fixes:
-     1. Seat-based turn order — only active player can act
-     2. Correct deck sizes: 15 unit, 15 blitz (no 3x copies)
-     3. Tile placement setup phase before the game
-     4. Card images restored
+   SERVER CLIENT — Zerchniv Blitz
+   Replaces the local engine. All game state lives on the Colyseus
+   server. This file only:
+     1. Sends player actions to the server
+     2. Listens to state patches and renders them
+     3. Shows/hides UI based on whose turn it is
+
+   The server (GameRoom.ts) is the single source of truth.
    ═══════════════════════════════════════════════════════════════ */
 
 (function () {
   'use strict';
 
-  // ── CARD DATABASE (15 units, 15 blitz — no duplicates) ──────
-  // Images use the card id to load from assets/cards/ folder.
-  // Format: assets/cards/u1.jpg etc. Falls back to colour block if missing.
-
-  const UNIT_CARDS = [
-    { id: 'u1',  name: 'Fireling',        type: 'unit', hp: 5,  maxHp: 5,  defense: 1, melee: 2, rangedRange: 0, speed: 3, size: 1, costNeutral: 1, element: 'fire'    },
-    { id: 'u2',  name: 'Ocean Wanderer',  type: 'unit', hp: 6,  maxHp: 6,  defense: 2, melee: 2, rangedRange: 2, speed: 2, size: 1, costNeutral: 1, element: 'water'   },
-    { id: 'u3',  name: 'Arid Scout',      type: 'unit', hp: 4,  maxHp: 4,  defense: 1, melee: 1, rangedRange: 3, speed: 4, size: 1, costNeutral: 1, element: 'neutral' },
-    { id: 'u4',  name: 'Stone Guard',     type: 'unit', hp: 8,  maxHp: 8,  defense: 3, melee: 3, rangedRange: 0, speed: 1, size: 2, costNeutral: 2, element: 'neutral' },
-    { id: 'u5',  name: 'Ember Hawk',      type: 'unit', hp: 3,  maxHp: 3,  defense: 0, melee: 1, rangedRange: 4, speed: 3, size: 1, costNeutral: 1, element: 'fire'    },
-    { id: 'u6',  name: 'Tide Caller',     type: 'unit', hp: 5,  maxHp: 5,  defense: 1, melee: 2, rangedRange: 2, speed: 2, size: 1, costNeutral: 2, element: 'water'   },
-    { id: 'u7',  name: 'Dune Strider',    type: 'unit', hp: 4,  maxHp: 4,  defense: 1, melee: 2, rangedRange: 0, speed: 4, size: 1, costNeutral: 1, element: 'neutral' },
-    { id: 'u8',  name: 'Lava Golem',      type: 'unit', hp: 10, maxHp: 10, defense: 4, melee: 4, rangedRange: 0, speed: 1, size: 3, costNeutral: 3, element: 'fire'    },
-    { id: 'u9',  name: 'Reef Stalker',    type: 'unit', hp: 5,  maxHp: 5,  defense: 2, melee: 2, rangedRange: 1, speed: 2, size: 1, costNeutral: 1, element: 'water'   },
-    { id: 'u10', name: 'Wind Dancer',     type: 'unit', hp: 3,  maxHp: 3,  defense: 0, melee: 1, rangedRange: 0, speed: 5, size: 1, costNeutral: 1, element: 'neutral' },
-    { id: 'u11', name: 'Iron Bastion',    type: 'unit', hp: 7,  maxHp: 7,  defense: 3, melee: 3, rangedRange: 0, speed: 1, size: 2, costNeutral: 2, element: 'neutral' },
-    { id: 'u12', name: 'Flame Sprite',    type: 'unit', hp: 3,  maxHp: 3,  defense: 0, melee: 2, rangedRange: 2, speed: 3, size: 1, costNeutral: 1, element: 'fire'    },
-    { id: 'u13', name: 'Deep Current',    type: 'unit', hp: 6,  maxHp: 6,  defense: 2, melee: 2, rangedRange: 0, speed: 2, size: 1, costNeutral: 2, element: 'water'   },
-    { id: 'u14', name: 'Dust Phantom',    type: 'unit', hp: 4,  maxHp: 4,  defense: 1, melee: 1, rangedRange: 3, speed: 3, size: 1, costNeutral: 1, element: 'neutral' },
-    { id: 'u15', name: 'Cinder Brute',    type: 'unit', hp: 9,  maxHp: 9,  defense: 3, melee: 4, rangedRange: 0, speed: 1, size: 2, costNeutral: 2, element: 'fire'    },
-  ];
-
-  // Combined Blitz + Structure deck = 15 cards
-  const BLITZ_CARDS = [
-    { id: 'b1',  name: 'Surge Forward',   type: 'blitz',     description: 'Move one unit 2 extra tiles this turn.',         costNeutral: 1 },
-    { id: 'b2',  name: 'Iron Shield',     type: 'blitz',     description: 'One unit gains +2 Defense until end of turn.',   costNeutral: 1 },
-    { id: 'b3',  name: 'War Cry',         type: 'blitz',     description: 'All your units gain +1 Melee this turn.',        costNeutral: 2 },
-    { id: 'b4',  name: 'Ambush',          type: 'blitz',     description: 'One unit may attack without being revealed.',    costNeutral: 1 },
-    { id: 'b5',  name: 'Tidal Wave',      type: 'blitz',     description: 'Push all adjacent enemy units 1 tile back.',     costNeutral: 2 },
-    { id: 'b6',  name: 'Smoke Screen',    type: 'blitz',     description: 'One unit cannot be targeted this turn.',         costNeutral: 1 },
-    { id: 'b7',  name: 'Quick Draw',      type: 'blitz',     description: 'Draw 1 extra card immediately.',                 costNeutral: 1 },
-    { id: 'b8',  name: 'Empower',         type: 'blitz',     description: 'One unit gains +2 to all stats this turn.',      costNeutral: 2 },
-    { id: 'b9',  name: 'Fortify',         type: 'structure', description: 'Build a wall. 10 HP, blocks movement.',          costNeutral: 1 },
-    { id: 'b10', name: 'Counter Charge',  type: 'blitz',     description: 'When attacked, deal damage back to attacker.',   costNeutral: 1 },
-    { id: 'b11', name: 'Outpost',         type: 'structure', description: 'Place an Outpost. Grants +1 Essence each turn.', costNeutral: 2 },
-    { id: 'b12', name: 'Rally',           type: 'blitz',     description: 'Heal all friendly units for 2 HP.',              costNeutral: 2 },
-    { id: 'b13', name: 'Trap',            type: 'blitz',     description: 'Place a trap on any tile. Triggers on entry.',   costNeutral: 1 },
-    { id: 'b14', name: 'Supply Depot',    type: 'structure', description: 'Place a depot. Draw 1 extra card per turn.',     costNeutral: 2 },
-    { id: 'b15', name: 'Last Stand',      type: 'blitz',     description: 'Reaction: when a unit is destroyed, deal 3 damage to attacker.', costNeutral: 1 },
-  ];
-
-  // ── ENGINE STATE ─────────────────────────────────────────────
-  const GS = {
-    turn:          0,
-    // mySeat: 'p1' or 'p2' — set from Colyseus game_start message
-    // Both players in the room get their own GS, so p1's "player" = their view
-    mySeat:        'p1',           // default; overwritten by network message
-    // 'p1' or 'p2' — who is currently taking their turn
-    activePlayer:  'p1',
-    // Game phase: 'tile_setup' | 'standby' | 'draw' | 'main' | 'end'
-    phase:         'tile_setup',
-    hands:         { player: [], opponent: [] },
-    decks:         { player: { unit: [], blitz: [] }, opponent: { unit: [], blitz: [] } },
-    discard:       { player: [], opponent: [] },
-    essence:       { player: { n: 0, f: 0, w: 0 }, opponent: { n: 0, f: 0, w: 0 } },
-    hasDrawnThisTurn: false,
-    deploySeq:     0,
-    // Tile placement state
-    tileBag:       { neutral: 20, fire: 8, water: 8 }, // tiles available to place
-    selectedTileType: null,   // 'neutral'|'fire'|'water' — currently chosen for placement
+  // ── CLIENT STATE (render-only, never authoritative) ───────────
+  const CS = {
+    mySeat:        null,   // sessionId assigned by server
+    activePlayerId: null,  // sessionId of whoever's turn it is
+    currentPhase:  null,   // Phase enum string from server
+    myHand:        [],     // card ids in my hand (private, sent directly)
+    tiles:         {},     // tileId → { tileType, revealed, occupiedBy }
+    units:         {},     // instanceId → unit data
+    essence:       { neutral: 0, fire: 0, water: 0 },
+    deckCounts:    { unit: 0, blitz: 0, discard: 0 },
+    oppDeckCounts: { unit: 0, blitz: 0 },
+    // Tile placement bag (from server state)
+    myTilesLeft:   { neutral: 19, elemental: 10 },
+    selectedTileType: null,   // for placement UI
+    // Card definitions (populated from server state patches)
+    cardDefs:      {},
     _deckPulseInterval: null,
-    started:       false,
-    // Setup complete flag (both players ready to start turns)
-    setupDone:     false,
+    ready: false,
   };
 
-  // ── SEAT HELPERS ─────────────────────────────────────────────
-  // "isMyTurn" = the active player's seat matches MY seat
-
+  // ── IS MY TURN ────────────────────────────────────────────────
   function isMyTurn() {
-    return GS.activePlayer === GS.mySeat;
+    return CS.mySeat && CS.activePlayerId && CS.mySeat === CS.activePlayerId;
   }
 
-  function isMyPhase() {
-    return isMyTurn() && (GS.phase !== 'tile_setup' || !GS.setupDone);
-  }
-
-  // ── UTILITY ──────────────────────────────────────────────────
-
-  function shuffle(arr) {
-    const a = [...arr];
-    for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
+  // ── SEND TO SERVER ────────────────────────────────────────────
+  // Routes through network.js's NET object or falls back to window.room
+  function send(type, payload) {
+    const msg = { type, ...payload };
+    if (window.NET && window.NET._room) {
+      window.NET._room.send(type, payload);
+    } else if (window.room) {
+      window.room.send(type, payload);
+    } else {
+      console.warn('[SERVER CLIENT] No room connection — cannot send:', type, payload);
     }
-    return a;
   }
 
-  function cloneCard(card, suffix) {
-    return { ...card, id: card.id + '_' + suffix };
-  }
-
-  function buildDeck(cards, suffix) {
-    // Exactly 1 copy of each card — 15 unit, 15 blitz
-    return shuffle(cards.map(c => cloneCard(c, suffix)));
-  }
-
+  // ── TOAST / LOG ───────────────────────────────────────────────
   function toast(msg) {
     if (typeof mtoast === 'function') { mtoast(msg); return; }
-    const el = document.querySelector('.mtoast');
-    if (!el) return;
-    el.textContent = msg;
-    el.classList.add('show');
-    setTimeout(() => el.classList.remove('show'), 2200);
   }
 
   function logCombat(msg, cls) {
@@ -676,77 +614,81 @@ document.addEventListener('DOMContentLoaded', function () {
     p.className = 'mclog-msg ' + (cls || 's');
     p.textContent = msg;
     log.prepend(p);
-    while (log.children.length > 60) log.removeChild(log.lastChild);
+    while (log.children.length > 80) log.removeChild(log.lastChild);
   }
 
-  // ── PHASE ANNOUNCEMENT ───────────────────────────────────────
-
-  function announcePhase(phaseName, sub) {
+  // ── PHASE ANNOUNCEMENT ────────────────────────────────────────
+  function announcePhase(title, sub) {
     const ann = document.querySelector('.mph-ann');
     if (!ann) return;
     const txt   = ann.querySelector('.mph-ann-txt');
     const subEl = ann.querySelector('.mph-ann-sub');
-    if (txt)   txt.textContent   = phaseName.toUpperCase();
+    if (txt)   txt.textContent   = title.toUpperCase();
     if (subEl) subEl.textContent = sub || '';
     ann.classList.add('show');
     setTimeout(() => ann.classList.remove('show'), 1600);
   }
 
-  // ── HUD UPDATERS ─────────────────────────────────────────────
+  // ── PHASE UI ─────────────────────────────────────────────────
+  // Maps server Phase enum to pill ids
+  const PHASE_MAP = {
+    'SETUP_TILES':  null,     // no pills for setup
+    'SETUP_EMPIRE': null,
+    'STANDBY':      'standby',
+    'DRAW':         'draw',
+    'MAIN':         'main',
+    'END':          'end',
+  };
 
-  function updatePhaseUI(phase, turn) {
-    ['standby', 'draw', 'main', 'end'].forEach(p => {
+  function updatePhaseUI(phase) {
+    ['standby','draw','main','end'].forEach(p => {
       const el = document.getElementById('m-ph-' + p);
-      if (el) el.classList.toggle('on', p === phase);
+      if (el) el.classList.toggle('on', PHASE_MAP[phase] === p);
     });
-    const turnEl = document.getElementById('m-turn');
-    if (turnEl && turn) turnEl.textContent = turn;
-
-    // Sync Phaser turn flag
+    // Sync Phaser turn flag — only allow interaction during MAIN phase on your turn
     if (window.HexScene) {
-      window.HexScene.isMyTurn = isMyTurn() && phase === 'main';
+      window.HexScene.isMyTurn = isMyTurn() && phase === 'MAIN';
     }
   }
 
-  function updateEssenceUI() {
-    const ess = GS.essence.player;
-    const en = document.getElementById('m-ess-n');
-    const ef = document.getElementById('m-ess-f');
-    const ew = document.getElementById('m-ess-w');
-    if (en) en.textContent = ess.n ?? 0;
-    if (ef) ef.textContent = ess.f ?? 0;
-    if (ew) ew.textContent = ess.w ?? 0;
-  }
-
-  function updateDeckCounts(side) {
-    const d = GS.decks[side];
-    const prefix = side === 'player' ? 'm-pl' : 'm-ai';
-    const udk  = document.getElementById(prefix + '-udk');
-    const bdk  = document.getElementById(prefix + '-bdk');
-    const disc = document.getElementById(prefix + '-disc');
-    if (udk)  udk.textContent  = d.unit.length;
-    if (bdk)  bdk.textContent  = d.blitz.length;
-    if (disc) disc.textContent = (GS.discard[side] || []).length;
-  }
-
   function updateTurnBanner() {
-    // Highlight whose name is active
-    const allNames = document.querySelectorAll('.hpname');
-    allNames.forEach(n => {
-      const isOpp = n.textContent.includes('Opponent') || n.textContent.includes('Commander') && n !== allNames[0];
+    document.querySelectorAll('.hpname').forEach(n => {
+      const isOpp = n.textContent.includes('Opponent');
       const myActive = isMyTurn();
-      if (isOpp) n.style.color = myActive ? 'rgba(240,232,220,.35)' : '#C9A84C';
-      else        n.style.color = myActive ? '#C9A84C' : 'rgba(240,232,220,.35)';
+      n.style.color = isOpp
+        ? (myActive ? 'rgba(240,232,220,.35)' : '#C9A84C')
+        : (myActive ? '#C9A84C' : 'rgba(240,232,220,.35)');
     });
   }
 
-  // ── DECK PULSE ────────────────────────────────────────────────
+  // ── ESSENCE UI ────────────────────────────────────────────────
+  function updateEssenceUI(essence) {
+    CS.essence = essence;
+    const en = document.getElementById('m-ess-n');
+    const ef = document.getElementById('m-ess-f');
+    const ew = document.getElementById('m-ess-w');
+    if (en) en.textContent = essence.neutral ?? 0;
+    if (ef) ef.textContent = essence.fire    ?? 0;
+    if (ew) ew.textContent = essence.water   ?? 0;
+  }
 
+  // ── DECK COUNT UI ─────────────────────────────────────────────
+  function updateDeckUI(unitCount, blitzCount, discardCount, isMe) {
+    const prefix = isMe ? 'm-pl' : 'm-ai';
+    const udk  = document.getElementById(prefix + '-udk');
+    const bdk  = document.getElementById(prefix + '-bdk');
+    const disc = document.getElementById(prefix + '-disc');
+    if (udk)  udk.textContent  = unitCount   ?? 0;
+    if (bdk)  bdk.textContent  = blitzCount  ?? 0;
+    if (disc) disc.textContent = discardCount ?? 0;
+  }
+
+  // ── DECK PULSE ────────────────────────────────────────────────
   function startDeckPulse() {
     stopDeckPulse();
     const btns = [document.querySelector('.mdk.unit'), document.querySelector('.mdk.blitz')];
     let on = true;
-    GS._deckPulseInterval = setInterval(() => {
+    CS._deckPulseInterval = setInterval(() => {
       on = !on;
       const glow   = on ? '0 0 18px 4px #C9A84C, inset 0 0 8px rgba(201,168,76,.3)' : 'none';
       const border = on ? '2px solid #C9A84C' : '1px solid rgba(255,140,0,.2)';
@@ -755,47 +697,28 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function stopDeckPulse() {
-    if (GS._deckPulseInterval) { clearInterval(GS._deckPulseInterval); GS._deckPulseInterval = null; }
+    if (CS._deckPulseInterval) { clearInterval(CS._deckPulseInterval); CS._deckPulseInterval = null; }
     [document.querySelector('.mdk.unit'), document.querySelector('.mdk.blitz')].forEach(b => {
       if (b) { b.style.boxShadow = ''; b.style.border = ''; }
     });
   }
 
-  // ── CARD IMAGE URL ────────────────────────────────────────────
-  // Returns image URL for a card. Looks in assets/cards/{id}.jpg
-  // If your images have different names, map them here.
-
-  const CARD_IMAGE_MAP = {
-    // Override specific card images here if filenames differ from id
-    // e.g. 'u1': 'assets/cards/fireling.jpg',
-  };
-
-  function cardImageUrl(card) {
-    if (CARD_IMAGE_MAP[card.id]) return CARD_IMAGE_MAP[card.id];
-    // Try the card's own imageUrl property first (if set from DB)
-    if (card.imageUrl) return card.imageUrl;
-    // Default path
-    return 'assets/cards/' + card.id.replace(/_.*$/, '') + '.jpg';
-  }
-
   // ── HAND RENDERING ───────────────────────────────────────────
-
   function renderHand() {
-    const cards  = GS.hands.player;
-    const area   = document.querySelector('.mhand-area');
+    const area = document.querySelector('.mhand-area');
     if (!area) return;
 
     const lbl = area.querySelector('.mhand-lbl');
     area.innerHTML = '';
     if (lbl) area.appendChild(lbl);
 
-    // During tile setup, show the tile placement bar instead of cards
-    if (GS.phase === 'tile_setup' && !GS.setupDone) {
-      _renderTileSetupBar(area);
+    // Tile setup phases — show tile placement bar
+    if (CS.currentPhase === 'SETUP_TILES' || CS.currentPhase === 'SETUP_EMPIRE') {
+      _renderSetupBar(area);
       return;
     }
 
-    if (!cards.length) {
+    if (!CS.myHand.length) {
       const empty = document.createElement('div');
       empty.style.cssText = 'font-size:.6rem;color:rgba(240,232,220,.3);padding:8px;align-self:center';
       empty.textContent = 'No cards in hand';
@@ -803,198 +726,127 @@ document.addEventListener('DOMContentLoaded', function () {
       return;
     }
 
-    const ess      = GS.essence.player;
-    const totalEss = ess.n + ess.f + ess.w;
-    const myMain   = isMyTurn() && GS.phase === 'main';
+    const totalEss = CS.essence.neutral + CS.essence.fire + CS.essence.water;
+    const myMain   = isMyTurn() && CS.currentPhase === 'MAIN';
 
-    cards.forEach(card => {
-      const el   = document.createElement('div');
-      el.className = 'mhcard';
-      el.dataset.cardId = card.id;
-
-      const cost    = card.costNeutral ?? 0;
+    CS.myHand.forEach(cardId => {
+      const def    = CS.cardDefs[cardId] || { id: cardId, name: cardId, type: 'unit', essenceCost: { neutral: 1 } };
+      const cost   = (def.essenceCost?.neutral ?? 0) + (def.essenceCost?.fire ?? 0) + (def.essenceCost?.water ?? 0);
       const canPlay = myMain && totalEss >= cost;
-      if (canPlay) el.classList.add('playable');
 
-      const imgUrl = cardImageUrl(card);
-      const elemColor = card.element === 'fire'  ? 'rgba(226,88,34,.6)'
-                      : card.element === 'water' ? 'rgba(30,144,255,.6)'
+      const el = document.createElement('div');
+      el.className = 'mhcard' + (canPlay ? ' playable' : '');
+      el.dataset.cardId = cardId;
+
+      const elemColor = def.element === 'fire'  ? 'rgba(226,88,34,.6)'
+                      : def.element === 'water' ? 'rgba(30,144,255,.6)'
                       : 'rgba(180,170,140,.4)';
-      const typeColor = card.type === 'unit'      ? '#FF6B8A'
-                      : card.type === 'structure' ? '#7ECF60'
-                      : '#FFAD45';
 
+      const imgUrl = 'assets/cards/' + cardId.toLowerCase() + '.jpg';
       el.innerHTML = `
-        <img src="${imgUrl}" alt="${card.name}"
-          style="width:100%;height:100%;object-fit:cover;display:block;border-radius:4px 4px 0 0;"
+        <img src="${imgUrl}" alt="${def.name}"
+          style="width:100%;height:100%;object-fit:cover;border-radius:4px 4px 0 0;"
           onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-        <div style="display:none;width:100%;height:100%;background:linear-gradient(160deg,${elemColor},rgba(10,10,8,.95));
-          flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:4px;text-align:center;border-radius:4px 4px 0 0;">
-          <div style="font-size:.52rem;font-weight:700;color:#F0E8DC;line-height:1.2">${card.name}</div>
-          <div style="font-size:.44rem;color:${typeColor};text-transform:uppercase;letter-spacing:.05em">${card.type}</div>
-          ${card.type === 'unit'
-            ? `<div style="font-size:.44rem;color:rgba(240,232,220,.5)">HP:${card.hp} SPD:${card.speed}</div>`
-            : `<div style="font-size:.42rem;color:rgba(240,232,220,.4);padding:0 2px">${(card.description||'').slice(0,32)}…</div>`}
+        <div style="display:none;width:100%;height:100%;
+          background:linear-gradient(160deg,${elemColor},rgba(10,10,8,.95));
+          flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:4px;text-align:center;">
+          <div style="font-size:.52rem;font-weight:700;color:#F0E8DC">${def.name}</div>
+          <div style="font-size:.44rem;color:rgba(201,168,76,.7);text-transform:uppercase">${def.type}</div>
+          ${def.type === 'unit'
+            ? `<div style="font-size:.44rem;color:rgba(240,232,220,.5)">HP:${def.hp} SPD:${def.speed}</div>`
+            : `<div style="font-size:.42rem;color:rgba(240,232,220,.4)">${(def.description||'').slice(0,30)}…</div>`}
         </div>
         <div class="mhcard-cost">${cost}</div>
       `;
-
-      el.addEventListener('click', () => {
-        if (GS.phase === 'tile_setup') return;
-        showCardPopup(card);
-      });
+      el.addEventListener('click', () => showCardPopup(cardId, def));
       area.appendChild(el);
     });
   }
 
-  // ── TILE SETUP BAR ───────────────────────────────────────────
-  // Renders the tile placement controls in the hand area during setup phase
+  // ── TILE SETUP BAR ────────────────────────────────────────────
+  function _renderSetupBar(area) {
+    const myTurn   = isMyTurn();
+    const isEmpire = CS.currentPhase === 'SETUP_EMPIRE';
 
-  function _renderTileSetupBar(area) {
     const bar = document.createElement('div');
-    bar.id = 'tile-setup-bar';
-    bar.style.cssText = `
-      display:flex; align-items:center; gap:1rem; padding:0 1rem;
-      width:100%; height:100%;
-    `;
+    bar.style.cssText = 'display:flex;align-items:center;gap:1rem;padding:0 1rem;width:100%;height:100%';
 
-    const label = document.createElement('div');
-    label.style.cssText = 'font-size:.7rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:rgba(240,232,220,.4);white-space:nowrap';
-    label.textContent = 'Place Tiles:';
-    bar.appendChild(label);
+    if (isEmpire) {
+      // Empire placement phase
+      const lbl = document.createElement('div');
+      lbl.style.cssText = 'font-size:.75rem;font-weight:700;color:' + (myTurn ? '#C9A84C' : 'rgba(240,232,220,.3)');
+      lbl.textContent = myTurn ? '⬡ Click a tile to place your Empire' : 'Waiting for opponent to place Empire…';
+      bar.appendChild(lbl);
+    } else {
+      // Tile placement phase
+      const labelEl = document.createElement('div');
+      labelEl.style.cssText = 'font-size:.7rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:rgba(240,232,220,.4);white-space:nowrap';
+      labelEl.textContent = myTurn ? 'Place Tiles:' : "Opponent placing tiles…";
+      bar.appendChild(labelEl);
 
-    // Tile type buttons
-    const TYPES = [
-      { type: 'neutral', color: '#B4AA8C', bg: 'rgba(180,170,140,.15)', border: 'rgba(180,170,140,.4)', label: 'Neutral' },
-      { type: 'fire',    color: '#F4956A', bg: 'rgba(226,88,34,.15)',   border: '#E25822',               label: 'Fire'    },
-      { type: 'water',   color: '#72B8FF', bg: 'rgba(30,144,255,.15)',  border: '#1E90FF',               label: 'Water'   },
-    ];
+      if (myTurn) {
+        const TYPES = [
+          { type: 'neutral',  color: '#B4AA8C', bg: 'rgba(180,170,140,.15)', border: 'rgba(180,170,140,.4)', label: 'Neutral',  count: CS.myTilesLeft.neutral  },
+          { type: 'fire',     color: '#F4956A', bg: 'rgba(226,88,34,.15)',   border: '#E25822',              label: 'Fire',     count: CS.myTilesLeft.elemental },
+          { type: 'water',    color: '#72B8FF', bg: 'rgba(30,144,255,.15)',  border: '#1E90FF',              label: 'Water',    count: CS.myTilesLeft.elemental },
+        ];
 
-    TYPES.forEach(({ type, color, bg, border, label: lbl }) => {
-      const count = GS.tileBag[type];
-      const btn = document.createElement('div');
-      btn.dataset.tileType = type;
-      btn.style.cssText = `
-        display:flex; align-items:center; gap:.4rem; padding:.35rem .75rem;
-        background:${bg}; border:1px solid ${border}; border-radius:5px;
-        cursor:pointer; transition:all .2s; user-select:none;
-        ${GS.selectedTileType === type ? `box-shadow:0 0 14px 3px ${color};border-color:${color};` : ''}
-      `;
-      btn.innerHTML = `
-        <span style="font-size:.8rem;font-weight:700;color:${color}">${lbl}</span>
-        <span style="display:flex;align-items:center;gap:.2rem">
-          <span style="font-size:.65rem;color:rgba(240,232,220,.5)">×</span>
-          <span style="font-size:.75rem;font-weight:700;color:#F0E8DC" id="tile-count-${type}">${count}</span>
-        </span>
-      `;
-      btn.addEventListener('click', () => selectTileType(type));
-      btn.addEventListener('mouseenter', () => {
-        if (GS.selectedTileType !== type) btn.style.borderColor = color;
-      });
-      btn.addEventListener('mouseleave', () => {
-        if (GS.selectedTileType !== type) btn.style.borderColor = border;
-      });
-      bar.appendChild(btn);
-    });
+        TYPES.forEach(({ type, color, bg, border, label, count }) => {
+          const btn = document.createElement('div');
+          btn.dataset.tileType = type;
+          const selected = CS.selectedTileType === type;
+          btn.style.cssText = `display:flex;align-items:center;gap:.4rem;padding:.35rem .75rem;
+            background:${selected ? 'rgba(201,168,76,.2)' : bg};
+            border:${selected ? '2px solid #C9A84C' : `1px solid ${border}`};
+            border-radius:5px;cursor:${count > 0 ? 'pointer' : 'default'};transition:all .2s;
+            opacity:${count > 0 ? '1' : '0.35'}`;
+          btn.innerHTML = `<span style="font-size:.8rem;font-weight:700;color:${color}">${label}</span>
+            <span style="font-size:.75rem;font-weight:700;color:#F0E8DC">×${count}</span>`;
 
-    // Instruction / done button
-    const right = document.createElement('div');
-    right.style.cssText = 'margin-left:auto;display:flex;align-items:center;gap:.75rem';
+          if (count > 0) {
+            btn.addEventListener('click', () => {
+              CS.selectedTileType = CS.selectedTileType === type ? null : type;
+              renderHand(); // re-render to show selection
+              toast(CS.selectedTileType ? 'Click a tile to place: ' + CS.selectedTileType : 'Deselected');
+            });
+          }
+          bar.appendChild(btn);
+        });
 
-    const instruction = document.createElement('div');
-    instruction.id = 'tile-setup-instruction';
-    instruction.style.cssText = 'font-size:.68rem;color:rgba(240,232,220,.45);font-style:italic';
-    instruction.textContent = GS.selectedTileType
-      ? 'Click a tile on the board to place it'
-      : 'Select a tile type above, then click the board';
-    right.appendChild(instruction);
+        // Done button
+        const right = document.createElement('div');
+        right.style.cssText = 'margin-left:auto;display:flex;align-items:center;gap:.5rem';
 
-    const doneBtn = document.createElement('div');
-    doneBtn.style.cssText = `
-      padding:.35rem .9rem; background:rgba(201,168,76,.15);
-      border:1px solid rgba(201,168,76,.4); border-radius:4px;
-      font-size:.75rem; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
-      color:#C9A84C; cursor:pointer; white-space:nowrap; transition:all .2s;
-    `;
-    doneBtn.textContent = 'Done Placing →';
-    doneBtn.addEventListener('click', finishTileSetup);
-    doneBtn.addEventListener('mouseenter', () => { doneBtn.style.background = 'rgba(201,168,76,.3)'; });
-    doneBtn.addEventListener('mouseleave', () => { doneBtn.style.background = 'rgba(201,168,76,.15)'; });
-    right.appendChild(doneBtn);
+        const instr = document.createElement('div');
+        instr.style.cssText = 'font-size:.65rem;color:rgba(240,232,220,.4);font-style:italic';
+        instr.textContent = CS.selectedTileType ? 'Click board to place' : 'Select type then click board';
+        right.appendChild(instr);
 
-    bar.appendChild(right);
+        const doneBtn = document.createElement('div');
+        doneBtn.style.cssText = `padding:.35rem .9rem;background:rgba(201,168,76,.15);
+          border:1px solid rgba(201,168,76,.4);border-radius:4px;font-size:.75rem;font-weight:700;
+          text-transform:uppercase;color:#C9A84C;cursor:pointer;white-space:nowrap;`;
+        doneBtn.textContent = 'Done →';
+        doneBtn.addEventListener('click', () => {
+          CS.selectedTileType = null;
+          send('end_tile_placement', {});
+          logCombat('✓ Tile placement submitted', 's');
+          toast('Waiting for opponent…');
+          renderHand();
+        });
+        right.appendChild(doneBtn);
+        bar.appendChild(right);
+      }
+    }
+
     area.appendChild(bar);
   }
 
-  function selectTileType(type) {
-    if (!isMyTurn() && GS.phase === 'tile_setup') {
-      // Both players can place tiles in setup phase — so allow it
-    }
-    GS.selectedTileType = (GS.selectedTileType === type) ? null : type;
-
-    // Update board cursor hint
-    if (window.HexScene) {
-      window.HexScene._tileSetupMode = !!GS.selectedTileType;
-    }
-
-    // Re-render to show selection state
-    renderHand();
-
-    const instr = document.getElementById('tile-setup-instruction');
-    if (instr) {
-      instr.textContent = GS.selectedTileType
-        ? 'Click any tile on the board to place ' + GS.selectedTileType
-        : 'Select a tile type above, then click the board';
-    }
-
-    toast(GS.selectedTileType ? 'Click a tile to place: ' + GS.selectedTileType : 'Deselected');
-  }
-
-  // Called when a board tile is clicked during setup
-  function placeTileOnBoard(tileId) {
-    if (GS.phase !== 'tile_setup' || !GS.selectedTileType) return false;
-    const type = GS.selectedTileType;
-    if (!GS.tileBag[type] || GS.tileBag[type] <= 0) {
-      toast('No more ' + type + ' tiles!');
-      return false;
-    }
-
-    // Place tile — make it visible and set its type
-    if (window.HexScene) {
-      const tile = window.HexScene.tiles.find(t => t.id === tileId);
-      if (!tile) return false;
-      tile.type = type;
-      window.HexScene._drawTile(tile, window.HexScene.tileGfx[window.HexScene.tiles.indexOf(tile)]);
-    }
-
-    GS.tileBag[type]--;
-
-    // Update count display
-    const countEl = document.getElementById('tile-count-' + type);
-    if (countEl) countEl.textContent = GS.tileBag[type];
-
-    logCombat('⬡ Placed ' + type + ' tile', 's');
-    return true;
-  }
-
-  function finishTileSetup() {
-    GS.selectedTileType = null;
-    GS.setupDone = true;
-    if (window.HexScene) window.HexScene._tileSetupMode = false;
-
-    logCombat('✓ Tile placement complete — game starting!', 'a');
-    toast('Tiles placed — game starting!');
-
-    // Short pause then begin Turn 1
-    setTimeout(() => beginTurn('p1'), 800);
-  }
-
-  // ── CARD POPUP ───────────────────────────────────────────────
-
-  function showCardPopup(card) {
+  // ── CARD POPUP ────────────────────────────────────────────────
+  function showCardPopup(cardId, def) {
     const pop = document.querySelector('.mcdpop');
     if (!pop) {
-      if (card.type === 'unit') deployUnit(card);
+      if (def.type === 'unit') beginDeploy(cardId, def);
       return;
     }
 
@@ -1004,55 +856,43 @@ document.addEventListener('DOMContentLoaded', function () {
     const abArea = pop.querySelector('.mcdpop-ab');
     const imgEl  = pop.querySelector('.mcdpop-img img, .mcdpop img');
 
-    if (nameEl) nameEl.textContent = card.name;
-    if (typeEl) { typeEl.textContent = card.type; typeEl.className = 'mcdpop-type ' + card.type; }
+    if (nameEl) nameEl.textContent = def.name || cardId;
+    if (typeEl) { typeEl.textContent = def.type; typeEl.className = 'mcdpop-type ' + def.type; }
+    if (imgEl)  { imgEl.src = 'assets/cards/' + cardId.toLowerCase() + '.jpg'; imgEl.alt = def.name; }
 
-    // Try to set popup image
-    if (imgEl) {
-      imgEl.src = cardImageUrl(card);
-      imgEl.alt = card.name;
-    }
-
-    if (sgEl) {
-      const stats = card.type === 'unit' ? [
-        { v: card.hp,           l: 'HP'    },
-        { v: card.defense,      l: 'DEF'   },
-        { v: card.melee,        l: 'Melee' },
-        { v: card.rangedRange || 0, l: 'Range' },
-        { v: card.speed,        l: 'Speed' },
-        { v: card.size,         l: 'Size'  },
-      ] : [
-        { v: card.costNeutral ?? 0, l: 'Cost' },
-      ];
-      sgEl.innerHTML = stats.map(s =>
-        `<div class="mcdpop-st"><span class="mcdpop-sv">${s.v}</span><span class="mcdpop-sl">${s.l}</span></div>`
-      ).join('');
+    if (sgEl && def.type === 'unit') {
+      sgEl.innerHTML = [
+        { v: def.hp,      l: 'HP'    },
+        { v: def.defense, l: 'DEF'   },
+        { v: def.melee,   l: 'Melee' },
+        { v: def.rangedAttack ?? 0, l: 'Range' },
+        { v: def.speed,   l: 'Speed' },
+        { v: def.size,    l: 'Size'  },
+      ].map(s => `<div class="mcdpop-st"><span class="mcdpop-sv">${s.v ?? '—'}</span><span class="mcdpop-sl">${s.l}</span></div>`).join('');
     }
 
     if (abArea) {
-      abArea.innerHTML = card.description
-        ? `<span class="mcdpop-abn">${card.name}:</span> ${card.description}`
-        : `<span class="mcdpop-abn">Deploy:</span> Place near your Empire tiles.`;
+      abArea.innerHTML = def.description
+        ? `<span class="mcdpop-abn">${def.name}:</span> ${def.description}`
+        : `<span class="mcdpop-abn">Deploy:</span> Place near your Empire or a Structure.`;
     }
 
     const playBtn = pop.querySelector('.mcdpop-play');
     if (playBtn) {
-      const ess      = GS.essence.player;
-      const totalEss = ess.n + ess.f + ess.w;
-      const cost     = card.costNeutral ?? 0;
-      const myMain   = isMyTurn() && GS.phase === 'main';
-      const canPlay  = myMain && totalEss >= cost;
+      const cost    = (def.essenceCost?.neutral ?? 0) + (def.essenceCost?.fire ?? 0) + (def.essenceCost?.water ?? 0);
+      const totalEss = CS.essence.neutral + CS.essence.fire + CS.essence.water;
+      const myMain  = isMyTurn() && CS.currentPhase === 'MAIN';
+      const canPlay = myMain && totalEss >= cost;
 
-      playBtn.textContent = card.type === 'unit'      ? '⬡ Deploy Unit'
-                          : card.type === 'structure' ? '🏗 Deploy Structure'
+      playBtn.textContent = def.type === 'unit' ? '⬡ Deploy Unit'
+                          : def.type === 'structure' ? '🏗 Deploy Structure'
                           : '⚡ Play Blitz';
       playBtn.disabled = !canPlay;
       playBtn.title    = canPlay ? '' : (myMain ? 'Not enough Essence' : 'Not your Main Phase');
       playBtn.onclick  = () => {
         pop.classList.remove('on');
-        if (card.type === 'unit')      deployUnit(card);
-        else if (card.type === 'blitz') playBlitz(card);
-        else                           playBlitz(card); // structure handled same way for now
+        if (def.type === 'unit') beginDeploy(cardId, def);
+        else                     send('play_blitz', { cardId });
       };
     }
 
@@ -1063,256 +903,83 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // ── UNIT DEPLOYMENT ──────────────────────────────────────────
-
-  function deployUnit(card) {
-    if (!isMyTurn() || GS.phase !== 'main') {
-      toast('Can only deploy during your Main Phase!');
+  function beginDeploy(cardId, def) {
+    if (!isMyTurn() || CS.currentPhase !== 'MAIN') {
+      toast('Not your Main Phase!');
       return;
     }
-    const ess  = GS.essence.player;
-    const cost = card.costNeutral ?? 0;
-    if (ess.n + ess.f + ess.w < cost) { toast('Not enough Essence!'); return; }
-
-    // Remove from hand & deduct essence
-    const idx = GS.hands.player.indexOf(card);
-    if (idx !== -1) GS.hands.player.splice(idx, 1);
-    ess.n = Math.max(0, ess.n - cost);
-    updateEssenceUI();
-    renderHand();
-
-    GS.deploySeq++;
-    const deployCard = { ...card, _deployId: 'unit_' + GS.deploySeq + '_' + card.id };
     if (window.HexScene) {
-      window.HexScene.beginDeploy(deployCard);
-      toast('Select a tile to place ' + card.name);
+      // Pass card to Phaser for tile selection; _doDeploy will fire 'unitDeployed' event
+      window.HexScene.beginDeploy({ ...def, id: cardId, _serverCardId: cardId });
+      toast('Select a spawn tile for ' + (def.name || cardId));
     }
   }
 
-  function playBlitz(card) {
-    const idx = GS.hands.player.indexOf(card);
-    if (idx !== -1) GS.hands.player.splice(idx, 1);
-    GS.discard.player.push(card);
-    const cost = card.costNeutral ?? 0;
-    GS.essence.player.n = Math.max(0, GS.essence.player.n - cost);
-    updateEssenceUI();
-    renderHand();
-    updateDeckCounts('player');
-    toast('⚡ ' + card.name + '!');
-    logCombat('⚡ ' + card.name + ': ' + (card.description || 'Effect activated.'), 'a');
-  }
-
-  // ── DRAW CARD ─────────────────────────────────────────────────
-
-  function drawCard(side, deckType) {
-    const deck = GS.decks[side][deckType];
-    if (!deck || !deck.length) {
-      if (side === 'player') toast('Your ' + deckType + ' deck is empty!');
-      return null;
-    }
-    const card = deck.shift();
-    GS.hands[side].push(card);
-    updateDeckCounts(side);
-    return card;
-  }
-
-  // ── TURN FLOW ─────────────────────────────────────────────────
-
-  function startGame() {
-    if (GS.started) return;
-    GS.started = true;
-
-    // Read mySeat from Colyseus network module if available
-    if (window._zbMySeat) GS.mySeat = window._zbMySeat;
-
-    // Build decks — exactly 15 cards each, no copies
-    GS.decks.player.unit   = buildDeck(UNIT_CARDS,  'pl');
-    GS.decks.player.blitz  = buildDeck(BLITZ_CARDS, 'pl');
-    GS.decks.opponent.unit  = buildDeck(UNIT_CARDS,  'op');
-    GS.decks.opponent.blitz = buildDeck(BLITZ_CARDS, 'op');
-
-    // Opening hands: 3 unit + 3 blitz each
-    for (let i = 0; i < 3; i++) {
-      drawCard('player',   'unit');
-      drawCard('player',   'blitz');
-      drawCard('opponent', 'unit');
-      drawCard('opponent', 'blitz');
-    }
-
-    updateDeckCounts('player');
-    updateDeckCounts('opponent');
-
-    // Resize Phaser
-    setTimeout(_resizePhaser, 200);
-
-    // Begin tile setup phase
-    setTimeout(() => {
-      GS.phase = 'tile_setup';
-      GS.activePlayer = 'p1'; // p1 goes first but both can place
-      updatePhaseUI('tile_setup', 1);
-
-      // Hook tile clicks in Phaser for placement
-      if (window.HexScene) window.HexScene._tileSetupMode = true;
-
-      announcePhase('Place Your Tiles', 'Click tile types below, then click the board');
-      logCombat('⬡ Game started — place tiles to begin', 's');
-      renderHand();
-      toast('Select a tile type below and click the board to place');
-    }, 400);
-  }
-
-  function beginTurn(seat) {
-    GS.turn++;
-    GS.activePlayer      = seat;
-    GS.hasDrawnThisTurn  = false;
-
-    // Grant 2 neutral Essence to the active player
-    // "player" side always = local player's view
-    if (seat === GS.mySeat) {
-      GS.essence.player.n = 2;
-      updateEssenceUI();
-    }
-
-    // Reset unit flags for the newly active player
-    if (window.HexScene) {
-      const ownerKey = seat === GS.mySeat ? 'player' : 'opponent';
-      window.HexScene.gameState.units.forEach(u => {
-        if (u.owner === ownerKey) {
-          u.hasMoved = false; u.hasActed = false; u.deployRest = false;
-        }
-      });
-    }
-
-    updateTurnBanner();
-    setPhase('standby');
-  }
-
-  function setPhase(phase) {
-    GS.phase = phase;
-    const myTurn = isMyTurn();
-    updatePhaseUI(phase, GS.turn);
-    stopDeckPulse();
-
-    switch (phase) {
-      case 'standby':
-        announcePhase(myTurn ? 'Your Turn' : "Opponent's Turn", 'Turn ' + GS.turn);
-        logCombat('⬡ Turn ' + GS.turn + ' — ' + (myTurn ? 'YOUR STANDBY' : "OPPONENT'S STANDBY"), 's');
-        setTimeout(() => setPhase('draw'), 1500);
-        break;
-
-      case 'draw':
-        announcePhase('Draw Phase', myTurn ? 'Click your deck to draw' : "Opponent drawing...");
-        if (myTurn) {
-          startDeckPulse();
-          toast('Draw a card — click Unit or Blitz deck');
-          renderHand(); // refresh playable state
-        } else {
-          // Opponent auto-draws
-          setTimeout(() => {
-            const type = Math.random() < 0.6 ? 'unit' : 'blitz';
-            drawCard('opponent', type);
-            setPhase('main');
-          }, 1200);
-        }
-        break;
-
-      case 'main':
-        announcePhase('Main Phase', myTurn ? 'Deploy, Move, or Attack' : "Opponent's Main Phase");
-        logCombat((myTurn ? '▶ Your' : "▶ Opponent's") + ' main phase', 's');
-        renderHand(); // refresh playable state
-        if (myTurn) {
-          toast('Main Phase — play cards or move units');
-        } else {
-          toast("Opponent's turn — click End Turn when ready");
-        }
-        break;
-
-      case 'end':
-        announcePhase('End Phase', '');
-        logCombat('◀ Turn ' + GS.turn + ' ends', 's');
-        setTimeout(() => {
-          const nextSeat = GS.activePlayer === 'p1' ? 'p2' : 'p1';
-          beginTurn(nextSeat);
-        }, 800);
-        break;
-    }
-  }
-
-  // ── HANDLERS (called by buttons) ──────────────────────────────
-
-  function handleEndTurn() {
-    if (GS.phase === 'tile_setup') {
-      finishTileSetup();
-      return;
-    }
-    if (!isMyTurn()) {
-      toast("It's not your turn!");
-      return;
-    }
-    if (GS.phase === 'draw' && !GS.hasDrawnThisTurn) {
-      toast('You must draw a card first!');
-      return;
-    }
-    if (GS.phase !== 'main' && GS.phase !== 'draw') {
-      toast('Wait for your Main Phase.');
-      return;
-    }
-    if (window.HexScene) window.HexScene._clearSelection();
-    setPhase('end');
-  }
-
-  function handleDrawCard(deckType) {
-    if (GS.phase === 'tile_setup') { toast('Finish placing tiles first'); return; }
-    if (!isMyTurn()) { toast("It's not your turn!"); return; }
-    if (GS.phase !== 'draw')       { toast('You can only draw during Draw Phase.'); return; }
-    if (GS.hasDrawnThisTurn)       { toast('Already drew this turn.'); return; }
-
-    const card = drawCard('player', deckType);
-    if (!card) return;
-
-    GS.hasDrawnThisTurn = true;
-    stopDeckPulse();
-    renderHand();
-    toast('Drew: ' + card.name);
-    logCombat('🃏 Drew ' + card.name + ' from ' + deckType + ' deck', 'a');
-    setTimeout(() => setPhase('main'), 700);
-  }
-
-  // ── PHASER SETUP MODE HOOK ───────────────────────────────────
-  // Intercept tile clicks during tile_setup phase
-  // game.js fires window.dispatchEvent(new CustomEvent('tileClicked', {detail: {tileId}}))
-  // OR we hook HexScene._onTileClick directly
-
-  function _hookPhaserTileClick() {
+  // ── BOARD RENDERING ───────────────────────────────────────────
+  // Apply tile state from server schema patches to Phaser
+  function applyTileState(tiles) {
     if (!window.HexScene) return;
-    const orig = window.HexScene._onTileClick.bind(window.HexScene);
-    window.HexScene._onTileClick = function (tile) {
-      if (GS.phase === 'tile_setup' && GS.selectedTileType) {
-        placeTileOnBoard(tile.id);
-        return; // don't pass through to normal tile click
-      }
-      orig(tile);
-    };
+    // tiles is a Colyseus MapSchema converted to plain object
+    Object.entries(tiles).forEach(([tileId, tileData]) => {
+      // Convert server tileId (e.g. "r3c5") to Phaser tile index if needed
+      const tile = window.HexScene.tiles.find(t => t.id === tileId || t.serverId === tileId);
+      if (!tile) return;
+      tile.type     = tileData.tileType  || 'hidden';
+      tile.revealed = tileData.revealed  ?? false;
+    });
+    window.HexScene._refreshAll();
   }
 
-  // ── PHASER RESIZE ────────────────────────────────────────────
-
-  function _resizePhaser() {
-    if (!window.PhaserGame) return;
-    const wrap = document.querySelector('.mboard-wrap');
-    if (!wrap) return;
-    const w = wrap.clientWidth, h = wrap.clientHeight;
-    if (w > 0 && h > 0) {
-      window.PhaserGame.scale.resize(w, h);
-      if (window.HexScene) {
-        window.HexScene._calculateLayout();
-        window.HexScene._buildBoard();
-        if (window.HexScene._resyncTokenPositions) window.HexScene._resyncTokenPositions();
+  function applyUnitState(units) {
+    if (!window.HexScene) return;
+    // Clear existing then re-apply
+    // Keep existing tokens, update positions
+    const incoming = Object.values(units);
+    incoming.forEach(u => {
+      const existing = window.HexScene.gameState.units.find(gu => gu.id === u.instanceId);
+      const owner    = u.ownerId === CS.mySeat ? 'player' : 'opponent';
+      if (existing) {
+        existing.hp       = u.currentHp;
+        existing.tileId   = u.tileId;
+        existing.hasMoved = u.hasMovedThisTurn;
+        existing.hasActed = u.hasAttackedThisTurn;
+      } else {
+        const def = CS.cardDefs[u.cardId] || {};
+        const newUnit = {
+          id:          u.instanceId,
+          tileId:      u.tileId,
+          owner,
+          name:        def.name || u.cardId,
+          hp:          u.currentHp,
+          maxHp:       def.hp    || u.currentHp,
+          speed:       def.speed || 2,
+          melee:       def.melee || 1,
+          rangedRange: def.rangedRange || 0,
+          defense:     def.defense || 0,
+          hasMoved:    u.hasMovedThisTurn,
+          hasActed:    u.hasAttackedThisTurn,
+          deployRest:  u.hasDevelopmentRest,
+        };
+        window.HexScene.gameState.units.push(newUnit);
+        window.HexScene._spawnToken(newUnit);
       }
-    }
+    });
+
+    // Remove units no longer in server state
+    const incomingIds = new Set(incoming.map(u => u.instanceId));
+    window.HexScene.gameState.units = window.HexScene.gameState.units.filter(u => {
+      if (!incomingIds.has(u.id)) {
+        window.HexScene._removeToken(u.id);
+        return false;
+      }
+      return true;
+    });
+
+    window.HexScene._refreshAll();
+    refreshUnitSidebar();
   }
 
   // ── SIDEBAR ───────────────────────────────────────────────────
-
   function refreshUnitSidebar() {
     if (!window.HexScene) return;
     const pUnits = window.HexScene.gameState.units.filter(u => u.owner === 'player');
@@ -1336,7 +1003,7 @@ document.addEventListener('DOMContentLoaded', function () {
       row.innerHTML = `<div class="uip-data">
         <div class="uip-nm">${u.name}</div>
         <div class="uip-hb"><div class="uip-hbf" style="width:${pct}%"></div></div>
-        <div class="uip-hp">${u.hp}/${u.maxHp || u.hp} HP</div>
+        <div class="uip-hp">${u.hp}/${u.maxHp} HP</div>
       </div>`;
       row.addEventListener('click', () => {
         if (!window.HexScene) return;
@@ -1348,40 +1015,225 @@ document.addEventListener('DOMContentLoaded', function () {
     });
   }
 
-  // ── WIRE HOOKS ────────────────────────────────────────────────
+  // ── HOOK: Phaser tile clicked during setup ────────────────────
+  function _hookPhaserTileClick() {
+    if (!window.HexScene || window.HexScene._serverClientHooked) return;
+    window.HexScene._serverClientHooked = true;
 
-  function wireHooks() {
-    if (typeof M !== 'undefined') {
-      M.endTurn  = handleEndTurn;
-      M.drawCard = handleDrawCard;
-      M.startGame = startGame;
-      M.selectAction = action => { if (window.HexScene) window.HexScene.selectAction(action); };
+    const origClick = window.HexScene._onTileClick.bind(window.HexScene);
+    window.HexScene._onTileClick = function (tile) {
+      // During tile placement
+      if (CS.currentPhase === 'SETUP_TILES' && CS.selectedTileType && isMyTurn()) {
+        // Determine correct type — fire and water both come from elemental budget
+        const serverType = CS.selectedTileType; // 'neutral', 'fire', or 'water'
+
+        // Optimistic local render
+        tile.type = serverType;
+        window.HexScene._drawTile(tile, window.HexScene.tileGfx[window.HexScene.tiles.indexOf(tile)]);
+
+        // Deduct from local count for UI
+        if (serverType === 'neutral') CS.myTilesLeft.neutral = Math.max(0, CS.myTilesLeft.neutral - 1);
+        else CS.myTilesLeft.elemental = Math.max(0, CS.myTilesLeft.elemental - 1);
+
+        renderHand(); // refresh counts
+
+        // Send to server
+        send('place_tile', { tileId: tile.id, tileType: serverType });
+        logCombat('⬡ Placed ' + serverType + ' tile', 's');
+        return;
+      }
+
+      // During empire placement
+      if (CS.currentPhase === 'SETUP_EMPIRE' && isMyTurn()) {
+        send('place_empire', { tileId: tile.id });
+        return;
+      }
+
+      // Normal game — pass through
+      origClick(tile);
+    };
+  }
+
+  // ── WIRE BUTTONS ─────────────────────────────────────────────
+  function wireButtons() {
+    // End Turn button
+    const endBtn = document.querySelector('.mhud-btn.end');
+    if (endBtn) {
+      endBtn.onclick = e => {
+        e.preventDefault();
+        if (!isMyTurn()) { toast("It's not your turn!"); return; }
+        if (CS.currentPhase === 'SETUP_TILES') {
+          CS.selectedTileType = null;
+          send('end_tile_placement', {});
+          toast('Tiles submitted — waiting for opponent…');
+          renderHand();
+        } else if (CS.currentPhase === 'DRAW') {
+          toast('Draw a card first!');
+        } else if (CS.currentPhase === 'MAIN') {
+          send('end_turn', {});
+          if (window.HexScene) window.HexScene._clearSelection();
+        } else {
+          toast('Wait for your turn.');
+        }
+      };
     }
 
-    const endBtn = document.querySelector('.mhud-btn.end');
-    if (endBtn) endBtn.onclick = e => { e.preventDefault(); handleEndTurn(); };
-
+    // Deck buttons — draw card
     const du = document.querySelector('.mdk.unit');
     const db = document.querySelector('.mdk.blitz');
-    if (du) du.onclick = () => handleDrawCard('unit');
-    if (db) db.onclick = () => handleDrawCard('blitz');
+    if (du) du.onclick = () => {
+      if (!isMyTurn() || CS.currentPhase !== 'DRAW') {
+        toast(isMyTurn() ? 'Not Draw Phase' : "Not your turn!"); return;
+      }
+      send('draw_card', { deck: 'unit' });
+      stopDeckPulse();
+    };
+    if (db) db.onclick = () => {
+      if (!isMyTurn() || CS.currentPhase !== 'DRAW') {
+        toast(isMyTurn() ? 'Not Draw Phase' : "Not your turn!"); return;
+      }
+      send('draw_card', { deck: 'blitz' });
+      stopDeckPulse();
+    };
+
+    // M object overrides (for any HTML onclick="M.xxx()")
+    if (typeof M !== 'undefined') {
+      M.endTurn  = () => endBtn?.click();
+      M.drawCard = type => type === 'unit' ? du?.click() : db?.click();
+      M.selectAction = action => { if (window.HexScene) window.HexScene.selectAction(action); };
+    }
+  }
+
+  // ── LISTEN TO SERVER STATE PATCHES ────────────────────────────
+  // network.js / bridge.js calls M.initFromServer(state, seat) on game_start.
+  // After that, Colyseus auto-patches arrive via room.onStateChange.
+  // We hook in by patching M.initFromServer and also listening on window events.
+
+  function onGameStart(seat, initialState) {
+    CS.mySeat = seat;
+    window._zbMySeat = seat;
+
+    console.log('[SERVER CLIENT] Game start — my seat:', seat);
+    logCombat('⬡ Game started — placing tiles', 's');
+
+    // Resize Phaser now that match screen is visible
+    setTimeout(_resizePhaser, 200);
+    setTimeout(() => {
+      wireButtons();
+      _hookPhaserTileClick();
+    }, 300);
+
+    // Set initial phase from state if provided
+    if (initialState?.currentPhase) {
+      onPhaseChange(initialState.currentPhase, initialState.activePlayerId);
+    } else {
+      onPhaseChange('SETUP_TILES', null);
+    }
+
+    renderHand();
+  }
+
+  function onPhaseChange(phase, activePlayerId) {
+    CS.currentPhase   = phase;
+    CS.activePlayerId = activePlayerId || CS.activePlayerId;
+
+    updatePhaseUI(phase);
+    updateTurnBanner();
+    stopDeckPulse();
+
+    const myTurn = isMyTurn();
+
+    switch (phase) {
+      case 'SETUP_TILES':
+        announcePhase(myTurn ? 'Place Your Tiles' : "Opponent Placing Tiles", '');
+        toast(myTurn ? 'Select a tile type, then click the board' : 'Waiting for opponent…');
+        break;
+      case 'SETUP_EMPIRE':
+        announcePhase(myTurn ? 'Place Your Empire' : "Opponent Placing Empire", '');
+        toast(myTurn ? 'Click a tile to place your Empire' : 'Waiting for opponent…');
+        break;
+      case 'STANDBY':
+        announcePhase(myTurn ? 'Your Turn' : "Opponent's Turn", '');
+        logCombat('⬡ ' + (myTurn ? 'YOUR' : "OPPONENT'S") + ' standby', 's');
+        break;
+      case 'DRAW':
+        announcePhase('Draw Phase', myTurn ? 'Click a deck to draw' : "Opponent drawing…");
+        if (myTurn) {
+          startDeckPulse();
+          toast('Click Unit or Blitz deck to draw');
+        }
+        break;
+      case 'MAIN':
+        announcePhase('Main Phase', myTurn ? 'Deploy, Move, or Attack' : "Opponent's turn");
+        logCombat((myTurn ? '▶ Your' : "▶ Opponent's") + ' main phase', 's');
+        if (myTurn) toast('Your Main Phase');
+        else        toast("Opponent's turn — wait…");
+        renderHand(); // refresh playable state
+        break;
+      case 'END':
+        announcePhase('End Phase', '');
+        break;
+    }
+
+    renderHand();
+  }
+
+  function onHandUpdate(cards) {
+    // Server sends private hand update directly to this client
+    CS.myHand = cards || [];
+    renderHand();
+  }
+
+  function onStateChange(state) {
+    // Called when Colyseus patches arrive
+    if (!state) return;
+
+    // Phase / active player
+    if (state.currentPhase !== undefined) {
+      const phaseChanged = state.currentPhase !== CS.currentPhase;
+      CS.currentPhase   = state.currentPhase;
+      CS.activePlayerId = state.activePlayerId;
+      if (phaseChanged) onPhaseChange(state.currentPhase, state.activePlayerId);
+      else { updateTurnBanner(); updatePhaseUI(state.currentPhase); }
+    }
+
+    // My essence (find my player state)
+    if (state.players && CS.mySeat) {
+      const me = state.players[CS.mySeat] || Object.values(state.players).find(p => p.sessionId === CS.mySeat);
+      if (me) {
+        updateEssenceUI(me.essence || { neutral: 0, fire: 0, water: 0 });
+        CS.myTilesLeft.neutral   = me.neutralTilesRemaining  ?? CS.myTilesLeft.neutral;
+        CS.myTilesLeft.elemental = me.elementalTilesRemaining ?? CS.myTilesLeft.elemental;
+        updateDeckUI(me.unitDeck?.length ?? 0, me.blitzDeck?.length ?? 0, me.discardPile?.length ?? 0, true);
+        if (me.hand) onHandUpdate(me.hand);
+      }
+      // Opponent deck counts
+      const opp = Object.values(state.players).find(p => p.sessionId !== CS.mySeat);
+      if (opp) updateDeckUI(opp.unitDeck?.length ?? 0, opp.blitzDeck?.length ?? 0, opp.discardPile?.length ?? 0, false);
+    }
+
+    // Tiles
+    if (state.tiles) applyTileState(state.tiles);
+
+    // Units
+    if (state.units) applyUnitState(state.units);
   }
 
   // ── PHASER EVENTS ─────────────────────────────────────────────
 
-  window.addEventListener('unitSelected', function (e) {
+  window.addEventListener('unitSelected', e => {
     const unit = e.detail;
     if (!unit) return;
     const nameEl  = document.getElementById('m-uab-name');
     const statsEl = document.getElementById('m-uab-stats');
     if (nameEl)  { nameEl.textContent = unit.name || unit.id; nameEl.style.color = '#F0E8DC'; }
     if (statsEl) {
-      const moved = unit.hasMoved  ? '<span style="color:#FF8888">Used</span>' : unit.speed + ' tiles';
+      const moved = unit.hasMoved ? '<span style="color:#FF8888">Used</span>' : unit.speed + ' tiles';
       statsEl.innerHTML = `
-        <span>HP <span>${unit.hp}/${unit.maxHp || unit.hp}</span></span>
+        <span>HP <span>${unit.hp}/${unit.maxHp||unit.hp}</span></span>
         <span>SPD <span>${moved}</span></span>
-        <span>MEL <span>${unit.melee ?? '—'}</span></span>
-        <span>RNG <span>${unit.rangedRange ?? 0}</span></span>
+        <span>MEL <span>${unit.melee??'—'}</span></span>
+        <span>RNG <span>${unit.rangedRange??0}</span></span>
       `;
     }
     const moveSub = document.getElementById('m-ab-move-sub');
@@ -1390,67 +1242,114 @@ document.addEventListener('DOMContentLoaded', function () {
     if (moveBtn) moveBtn.classList.toggle('disabled', !!unit.hasMoved || !!unit.deployRest);
   });
 
-  window.addEventListener('unitDeselected', function () {
+  window.addEventListener('unitDeselected', () => {
     const n = document.getElementById('m-uab-name');
     const s = document.getElementById('m-uab-stats');
     if (n) { n.textContent = '— Select a unit on board —'; n.style.color = 'rgba(240,232,220,.3)'; }
     if (s) s.innerHTML = '';
   });
 
-  window.addEventListener('unitDeployed', function () {
-    renderHand();
+  window.addEventListener('unitDeployed', e => {
+    const unit = e.detail;
+    if (!unit || !unit._serverCardId) return;
+    // unit was placed on tile via Phaser — send to server
+    send('play_unit', { cardId: unit._serverCardId, spawnTileId: unit.tileId });
+    logCombat('⬡ Deploying unit…', 'a');
     refreshUnitSidebar();
-    logCombat('⬡ Unit deployed', 'a');
   });
 
-  // ── EXPOSE & STARTUP ──────────────────────────────────────────
-
-  window.ZB = {
-    GS, startGame, setPhase, beginTurn, drawCard,
-    handleEndTurn, handleDrawCard, wireHooks,
-    renderHand, refreshUnitSidebar, selectTileType,
-    placeTileOnBoard, finishTileSetup,
-  };
-
-  // Hook into network.js game_start to capture mySeat
-  // network.js sets window._zbMySeat = seat when game_start fires
-  // (requires 1-line addition to network.js — see README comment below)
-
-  function _tryStart() {
-    if (GS.started) return;
-    // If network.js already called M.initFromServer (window._zbMySeat is set),
-    // let that handler call startGame() — don't start here or we double-deal.
-    if (window._zbMySeat !== undefined) return;
-    const mscr = document.getElementById('mscr');
-    if (mscr && mscr.classList.contains('on') && window.HexScene) {
-      console.log('[LOCAL ENGINE v2] Starting (no network) — seat:', GS.mySeat);
-      wireHooks();
-      _hookPhaserTileClick();
-      startGame();
+  // ── PHASER RESIZE ─────────────────────────────────────────────
+  function _resizePhaser() {
+    if (!window.PhaserGame) return;
+    const wrap = document.querySelector('.mboard-wrap');
+    if (!wrap) return;
+    const w = wrap.clientWidth, h = wrap.clientHeight;
+    if (w > 0 && h > 0) {
+      window.PhaserGame.scale.resize(w, h);
+      if (window.HexScene) {
+        window.HexScene._calculateLayout();
+        window.HexScene._buildBoard();
+        if (window.HexScene._resyncTokenPositions) window.HexScene._resyncTokenPositions();
+      }
     }
   }
 
-  let _attempts = 0;
-  const _poller = setInterval(() => {
-    _attempts++;
-    _tryStart();
-    if (GS.started || _attempts > 120) {
-      clearInterval(_poller);
-      if (GS.started) {
-        // Hook tile click now that HexScene is confirmed ready
-        setTimeout(_hookPhaserTileClick, 500);
+  // ── EXPOSE ───────────────────────────────────────────────────
+  window.ZB = {
+    CS,
+    isMyTurn,
+    onGameStart,
+    onPhaseChange,
+    onHandUpdate,
+    onStateChange,
+    send,
+    renderHand,
+    wireButtons,
+  };
+
+  // ── INIT: hook into bridge.js M.initFromServer ────────────────
+  // bridge.js patches M.initFromServer and calls it with (state, seat).
+  // We override that here to route into our onGameStart.
+  // This runs after bridge.js DOMContentLoaded block completes.
+
+  function _installHooks() {
+    if (typeof M === 'undefined') {
+      setTimeout(_installHooks, 100);
+      return;
+    }
+
+    const _prevInit = M.initFromServer;
+    M.initFromServer = function (state, seat) {
+      if (_prevInit) _prevInit.call(M, state, seat);
+      onGameStart(seat, state);
+    };
+
+    // Hook state changes — network.js may expose room on window
+    function _tryHookRoom() {
+      const room = window.NET?._room || window.room;
+      if (room && !room._serverClientHooked) {
+        room._serverClientHooked = true;
+        room.onStateChange(state => onStateChange(state));
+
+        // Also listen for direct messages (hand updates, errors)
+        room.onMessage('hand_update',    msg => onHandUpdate(msg.cards));
+        room.onMessage('phase_change',   msg => onPhaseChange(msg.phase, msg.activePlayerId));
+        room.onMessage('tile_placed',    msg => {
+          logCombat('⬡ Tile placed at ' + msg.tileId, 's');
+          if (window.HexScene) {
+            const tile = window.HexScene.tiles.find(t => t.id === msg.tileId);
+            if (tile) {
+              tile.type = msg.tileType;
+              window.HexScene._drawTile(tile, window.HexScene.tileGfx[window.HexScene.tiles.indexOf(tile)]);
+            }
+          }
+        });
+        room.onMessage('error', msg => toast('⚠ ' + msg.message));
+        room.onMessage('valid_moves', msg => {
+          if (window.HexScene) window.HexScene._clearHighlights();
+          if (!msg.tiles) return;
+          msg.tiles.forEach(id => {
+            const t = window.HexScene?.tiles.find(t => t.id === id);
+            if (t) t.highlight = 2; // HL.MOVE = light blue
+          });
+          window.HexScene?._refreshAll();
+        });
+        console.log('[SERVER CLIENT] Room hooked for state changes');
+      } else if (!room) {
+        setTimeout(_tryHookRoom, 300);
       }
     }
-  }, 250);
+    setTimeout(_tryHookRoom, 300);
 
-  window.addEventListener('hexSceneReady', () => setTimeout(_tryStart, 100));
+    wireButtons();
+    console.log('[SERVER CLIENT] Hooks installed');
+  }
 
-  const _mscr = document.getElementById('mscr');
-  if (_mscr) new MutationObserver(muts => {
-    for (const m of muts) if (m.attributeName === 'class') setTimeout(_tryStart, 200);
-  }).observe(_mscr, { attributes: true });
+  window.addEventListener('hexSceneReady', () => {
+    setTimeout(_hookPhaserTileClick, 200);
+  });
 
-  wireHooks();
-  console.log('[LOCAL ENGINE v2] Loaded');
+  _installHooks();
+  console.log('[SERVER CLIENT] Loaded');
 
 })();
