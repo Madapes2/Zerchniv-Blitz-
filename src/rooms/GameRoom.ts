@@ -429,7 +429,22 @@ export class GameRoom extends Room<GameRoomState> {
   // ============================================================
 
   private handlePlaceTile(client: Client, tileId: string, tileType: string) {
-    const player = this.gs.players.get(client.sessionId)!;
+    try {
+    // Validate inputs
+    if (!tileId || typeof tileId !== 'string') {
+      console.error('[GameRoom] handlePlaceTile: invalid tileId', tileId);
+      client.send("error", { code: "BAD_REQUEST", message: "Invalid tile id." });
+      return;
+    }
+    const validTypes = ["neutral", "fire", "water"];
+    if (!validTypes.includes(tileType)) {
+      console.error('[GameRoom] handlePlaceTile: invalid tileType', tileType);
+      client.send("error", { code: "BAD_REQUEST", message: "Invalid tile type." });
+      return;
+    }
+
+    const player = this.gs.players.get(client.sessionId);
+    if (!player) { console.error('[GameRoom] handlePlaceTile: no player'); return; }
 
     if (this.gs.tiles.has(tileId)) {
       client.send("error", { code: "TILE_EXISTS", message: "Tile already placed." });
@@ -478,6 +493,7 @@ export class GameRoom extends Room<GameRoomState> {
       neutralRemaining:   remainingNeutral,
       elementalRemaining: remainingElemental,
     });
+    } catch(e) { console.error('[GameRoom] handlePlaceTile error:', e); }
   }
 
   private handleEndTilePlacement(client: Client) {
