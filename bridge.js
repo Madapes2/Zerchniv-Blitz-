@@ -1317,26 +1317,6 @@ document.addEventListener('DOMContentLoaded', function () {
       else { updateTurnBanner(); updatePhaseUI(incomingPhase); }
     }
 
-    // My essence (find my player state)
-    if (state.players && CS.mySeat) {
-      const me = state.players[CS.mySeat] || Object.values(state.players).find(p => p.sessionId === CS.mySeat);
-      if (me) {
-        updateEssenceUI(me.essence || { neutral: 0, fire: 0, water: 0 });
-        if (me.neutralTilesRemaining !== undefined)   CS.myTilesLeft.neutral = me.neutralTilesRemaining;
-        if (me.elementalTilesRemaining !== undefined) {
-          // Server tracks one elemental pool; split evenly between fire/water for display
-          const half = Math.ceil(me.elementalTilesRemaining / 2);
-          CS.myTilesLeft.fire  = Math.min(half, me.elementalTilesRemaining);
-          CS.myTilesLeft.water = me.elementalTilesRemaining - CS.myTilesLeft.fire;
-        }
-        updateDeckUI(me.unitDeck?.length ?? 0, me.blitzDeck?.length ?? 0, me.discardPile?.length ?? 0, true);
-        if (me.hand) onHandUpdate(me.hand);
-      }
-      // Opponent deck counts
-      const opp = Object.values(state.players).find(p => p.sessionId !== CS.mySeat);
-      if (opp) updateDeckUI(opp.unitDeck?.length ?? 0, opp.blitzDeck?.length ?? 0, opp.discardPile?.length ?? 0, false);
-    }
-
     // Tiles
     if (state.tiles) applyTileState(state.tiles);
 
