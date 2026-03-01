@@ -577,8 +577,8 @@ document.addEventListener('DOMContentLoaded', function () {
     essence:       { neutral: 0, fire: 0, water: 0 },
     deckCounts:    { unit: 0, blitz: 0, discard: 0 },
     oppDeckCounts: { unit: 0, blitz: 0 },
-    // Tile placement bag (from server state)
-    myTilesLeft:   { neutral: 19, elemental: 10 },
+    // Tile placement bag — 19 neutral, 5 fire, 5 water
+    myTilesLeft:   { neutral: 19, fire: 5, water: 5 },
     selectedTileType: null,   // for placement UI
     // Card definitions (populated from server state patches)
     cardDefs:      {},
@@ -717,7 +717,8 @@ document.addEventListener('DOMContentLoaded', function () {
     if (lbl) area.appendChild(lbl);
 
     // Tile setup phases — show tile placement bar
-    if (CS.currentPhase === 'SETUP_TILES' || CS.currentPhase === 'SETUP_EMPIRE') {
+    const phaseNorm = (CS.currentPhase || '').toLowerCase();
+    if (phaseNorm === 'setup_tiles' || phaseNorm === 'setup_empire') {
       _renderSetupBar(area);
       return;
     }
@@ -790,9 +791,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
       if (myTurn) {
         const TYPES = [
-          { type: 'neutral',  color: '#B4AA8C', bg: 'rgba(180,170,140,.15)', border: 'rgba(180,170,140,.4)', label: 'Neutral',  count: CS.myTilesLeft.neutral  },
-          { type: 'fire',     color: '#F4956A', bg: 'rgba(226,88,34,.15)',   border: '#E25822',              label: 'Fire',     count: CS.myTilesLeft.elemental },
-          { type: 'water',    color: '#72B8FF', bg: 'rgba(30,144,255,.15)',  border: '#1E90FF',              label: 'Water',    count: CS.myTilesLeft.elemental },
+          { type: 'neutral', color: '#B4AA8C', bg: 'rgba(180,170,140,.15)', border: 'rgba(180,170,140,.4)', label: 'Neutral', count: CS.myTilesLeft.neutral },
+          { type: 'fire',    color: '#F4956A', bg: 'rgba(226,88,34,.15)',   border: '#E25822',              label: 'Fire',    count: CS.myTilesLeft.fire    },
+          { type: 'water',   color: '#72B8FF', bg: 'rgba(30,144,255,.15)',  border: '#1E90FF',              label: 'Water',   count: CS.myTilesLeft.water   },
         ];
 
         TYPES.forEach(({ type, color, bg, border, label, count }) => {
@@ -1037,7 +1038,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // Deduct from local count for UI
         if (serverType === 'neutral') CS.myTilesLeft.neutral = Math.max(0, CS.myTilesLeft.neutral - 1);
-        else CS.myTilesLeft.elemental = Math.max(0, CS.myTilesLeft.elemental - 1);
+        else if (serverType === 'fire')  CS.myTilesLeft.fire  = Math.max(0, CS.myTilesLeft.fire  - 1);
+        else if (serverType === 'water') CS.myTilesLeft.water = Math.max(0, CS.myTilesLeft.water - 1);
 
         renderHand(); // refresh counts
 
@@ -1218,8 +1220,13 @@ document.addEventListener('DOMContentLoaded', function () {
       const me = state.players[CS.mySeat] || Object.values(state.players).find(p => p.sessionId === CS.mySeat);
       if (me) {
         updateEssenceUI(me.essence || { neutral: 0, fire: 0, water: 0 });
-        CS.myTilesLeft.neutral   = me.neutralTilesRemaining  ?? CS.myTilesLeft.neutral;
-        CS.myTilesLeft.elemental = me.elementalTilesRemaining ?? CS.myTilesLeft.elemental;
+        if (me.neutralTilesRemaining !== undefined)   CS.myTilesLeft.neutral = me.neutralTilesRemaining;
+        if (me.elementalTilesRemaining !== undefined) {
+          // Server tracks one elemental pool; split evenly between fire/water for display
+          const half = Math.ceil(me.elementalTilesRemaining / 2);
+          CS.myTilesLeft.fire  = Math.min(half, me.elementalTilesRemaining);
+          CS.myTilesLeft.water = me.elementalTilesRemaining - CS.myTilesLeft.fire;
+        }
         updateDeckUI(me.unitDeck?.length ?? 0, me.blitzDeck?.length ?? 0, me.discardPile?.length ?? 0, true);
         if (me.hand) onHandUpdate(me.hand);
       }
@@ -1338,14 +1345,30 @@ document.addEventListener('DOMContentLoaded', function () {
         // Also listen for direct messages (hand updates, errors)
         room.onMessage('hand_update',    msg => onHandUpdate(msg.cards));
         room.onMessage('phase_change',   msg => onPhaseChange(msg.phase, msg.activePlayerId));
-        room.onMessage('tile_placed',    msg => {
-          logCombat('⬡ Tile placed at ' + msg.tileId, 's');
+        room.onMessage('tile_placed', msg => {
+          logCombat('⬡ ' + msg.byPlayer + ' placed ' + msg.tileType + ' tile', 's');
+
+          // Update board for both players
           if (window.HexScene) {
             const tile = window.HexScene.tiles.find(t => t.id === msg.tileId);
             if (tile) {
               tile.type = msg.tileType;
-              window.HexScene._drawTile(tile, window.HexScene.tileGfx[window.HexScene.tiles.indexOf(tile)]);
+              const idx = window.HexScene.tiles.indexOf(tile);
+              if (window.HexScene.tileGfx && window.HexScene.tileGfx[idx]) {
+                window.HexScene._drawTile(tile, window.HexScene.tileGfx[idx]);
+              }
             }
+          }
+
+          // If this was placed by me, update my remaining counts from server truth
+          if (msg.byPlayer === CS.mySeat) {
+            CS.myTilesLeft.neutral = msg.neutralRemaining ?? CS.myTilesLeft.neutral;
+            if (msg.elementalRemaining !== undefined) {
+              const e = msg.elementalRemaining;
+              CS.myTilesLeft.fire  = Math.ceil(e / 2);
+              CS.myTilesLeft.water = e - CS.myTilesLeft.fire;
+            }
+            renderHand(); // refresh counts display
           }
         });
         room.onMessage('error', msg => toast('⚠ ' + msg.message));
