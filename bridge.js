@@ -710,7 +710,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // ── HAND RENDERING ───────────────────────────────────────────
   function renderHand() {
     const area = document.querySelector('.mhand-area');
-    if (!area) return;
+    if (!area) { console.warn('[ZB] renderHand: .mhand-area not found'); return; }
 
     const lbl = area.querySelector('.mhand-lbl');
     area.innerHTML = '';
@@ -718,6 +718,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Tile setup phases — show tile placement bar
     const phaseNorm = (CS.currentPhase || '').toLowerCase();
+    console.log('[ZB] renderHand — phase:', CS.currentPhase, '| phaseNorm:', phaseNorm, '| isMyTurn:', isMyTurn());
     if (phaseNorm === 'setup_tiles' || phaseNorm === 'setup_empire') {
       _renderSetupBar(area);
       return;
@@ -774,7 +775,12 @@ document.addEventListener('DOMContentLoaded', function () {
     const isEmpire = (CS.currentPhase || '').toLowerCase() === 'setup_empire';
 
     const bar = document.createElement('div');
-    bar.style.cssText = 'display:flex;align-items:center;gap:1rem;padding:0 1rem;width:100%;height:100%';
+    bar.style.cssText = `
+      display:flex;align-items:center;gap:1rem;padding:0 1.5rem;
+      width:100%;min-height:60px;height:100%;
+      background:rgba(6,4,12,0.6);
+      border-top:1px solid rgba(201,168,76,0.2);
+    `;
 
     if (isEmpire) {
       // Empire placement phase
@@ -786,7 +792,8 @@ document.addEventListener('DOMContentLoaded', function () {
       // Tile placement phase
       const labelEl = document.createElement('div');
       labelEl.style.cssText = 'font-size:.7rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:rgba(240,232,220,.4);white-space:nowrap';
-      labelEl.textContent = myTurn ? 'Place Tiles:' : "Opponent placing tiles…";
+      labelEl.style.cssText = 'font-size:.8rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:' + (myTurn ? 'rgba(201,168,76,.8)' : 'rgba(240,232,220,.3)') + ';white-space:nowrap';
+      labelEl.textContent = myTurn ? 'Place Your Tiles:' : "Waiting for opponent to place tiles…";
       bar.appendChild(labelEl);
 
       if (myTurn) {
@@ -800,13 +807,21 @@ document.addEventListener('DOMContentLoaded', function () {
           const btn = document.createElement('div');
           btn.dataset.tileType = type;
           const selected = CS.selectedTileType === type;
-          btn.style.cssText = `display:flex;align-items:center;gap:.4rem;padding:.35rem .75rem;
-            background:${selected ? 'rgba(201,168,76,.2)' : bg};
+          btn.style.cssText = `
+            display:flex;align-items:center;gap:.5rem;padding:.5rem 1.1rem;
+            background:${selected ? 'rgba(201,168,76,.25)' : bg};
             border:${selected ? '2px solid #C9A84C' : `1px solid ${border}`};
-            border-radius:5px;cursor:${count > 0 ? 'pointer' : 'default'};transition:all .2s;
-            opacity:${count > 0 ? '1' : '0.35'}`;
-          btn.innerHTML = `<span style="font-size:.8rem;font-weight:700;color:${color}">${label}</span>
-            <span style="font-size:.75rem;font-weight:700;color:#F0E8DC">×${count}</span>`;
+            border-radius:6px;cursor:${count > 0 ? 'pointer' : 'not-allowed'};
+            transition:all .15s;opacity:${count > 0 ? '1' : '0.3'};
+            ${selected ? `box-shadow:0 0 12px 2px ${color}55;` : ''}
+          `;
+          btn.innerHTML = `
+            <span style="font-size:.9rem;font-weight:700;letter-spacing:.04em;color:${color}">${label}</span>
+            <span style="display:flex;align-items:center;gap:.15rem">
+              <span style="font-size:.7rem;color:rgba(240,232,220,.4)">×</span>
+              <span style="font-size:.9rem;font-weight:700;color:#F0E8DC">${count}</span>
+            </span>
+          `;
 
           if (count > 0) {
             btn.addEventListener('click', () => {
@@ -828,10 +843,14 @@ document.addEventListener('DOMContentLoaded', function () {
         right.appendChild(instr);
 
         const doneBtn = document.createElement('div');
-        doneBtn.style.cssText = `padding:.35rem .9rem;background:rgba(201,168,76,.15);
-          border:1px solid rgba(201,168,76,.4);border-radius:4px;font-size:.75rem;font-weight:700;
-          text-transform:uppercase;color:#C9A84C;cursor:pointer;white-space:nowrap;`;
-        doneBtn.textContent = 'Done →';
+        doneBtn.style.cssText = `
+          padding:.5rem 1.2rem;background:rgba(201,168,76,.2);
+          border:1px solid rgba(201,168,76,.6);border-radius:5px;
+          font-size:.85rem;font-weight:700;letter-spacing:.06em;
+          text-transform:uppercase;color:#C9A84C;cursor:pointer;white-space:nowrap;
+          box-shadow:0 0 10px rgba(201,168,76,.2);
+        `;
+        doneBtn.textContent = 'Done Placing →';
         doneBtn.addEventListener('click', () => {
           CS.selectedTileType = null;
           send('end_tile_placement', {});
@@ -1144,7 +1163,10 @@ document.addEventListener('DOMContentLoaded', function () {
                || 'setup_tiles';
     onPhaseChange(phase, activeSeat);
 
+    // renderHand immediately and again after layout settles
     renderHand();
+    setTimeout(renderHand, 300);
+    setTimeout(renderHand, 800);
   }
 
   function onPhaseChange(phase, activePlayerId) {
@@ -1191,7 +1213,9 @@ document.addEventListener('DOMContentLoaded', function () {
         break;
     }
 
+    // Always re-render after phase change — ensures setup bar shows for correct player
     renderHand();
+    setTimeout(renderHand, 200);
   }
 
   function onHandUpdate(cards) {
