@@ -1441,9 +1441,6 @@ document.addEventListener('DOMContentLoaded', function () {
     // created anywhere is captured automatically.
     _interceptColyseusRoom();
 
-    // Also patch Room.prototype.send to sniff room reference
-    _sniffRoomFromSend();
-
     const _prevInit = M.initFromServer;
     M.initFromServer = function (state, seat) {
       if (_prevInit) _prevInit.call(M, state, seat);
