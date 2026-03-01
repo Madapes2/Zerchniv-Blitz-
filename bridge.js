@@ -1244,27 +1244,18 @@ document.addEventListener('DOMContentLoaded', function () {
     // renderHand immediately and again after layout settles
     renderHand();
 
-    // Drain any queued phase_change / state_update that arrived before seat was set
+    // Apply the most recently seen phase/activePlayer (may have arrived before seat was set)
     setTimeout(() => {
-      if (window._zbPendingPhase) {
-        console.log('[ZB] Draining queued phase_change:', window._zbPendingPhase);
-        onPhaseChange(window._zbPendingPhase.phase, window._zbPendingPhase.activePid);
-        window._zbPendingPhase = null;
+      const latestPhase  = window._zbLatestPhase  || CS.currentPhase;
+      const latestActive = window._zbLatestActive || CS.activePlayerId;
+      console.log('[ZB] Post-seat sync — latestPhase:', latestPhase, '| latestActive:', latestActive, '| mySeat:', CS.mySeat);
+      if (latestPhase || latestActive) {
+        // Re-apply phase with latest known active player
+        onPhaseChange(latestPhase || CS.currentPhase, latestActive);
+      } else {
+        renderHand();
       }
-      if (window._zbPendingState) {
-        console.log('[ZB] Draining queued state_update');
-        onStateChange(window._zbPendingState);
-        const s = window._zbPendingState;
-        if (s.phase && s.phase !== CS.currentPhase) onPhaseChange(s.phase, s.activePlayer);
-        else if (s.activePlayer && s.activePlayer !== CS.activePlayerId) {
-          CS.activePlayerId = s.activePlayer;
-          updateTurnBanner();
-          renderHand();
-        }
-        window._zbPendingState = null;
-      }
-      renderHand();
-    }, 100);
+    }, 150);
   }
 
   function onPhaseChange(phase, activePlayerId) {
