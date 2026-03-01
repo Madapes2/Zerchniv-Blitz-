@@ -1243,8 +1243,28 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // renderHand immediately and again after layout settles
     renderHand();
-    setTimeout(renderHand, 300);
-    setTimeout(renderHand, 800);
+
+    // Drain any queued phase_change / state_update that arrived before seat was set
+    setTimeout(() => {
+      if (window._zbPendingPhase) {
+        console.log('[ZB] Draining queued phase_change:', window._zbPendingPhase);
+        onPhaseChange(window._zbPendingPhase.phase, window._zbPendingPhase.activePid);
+        window._zbPendingPhase = null;
+      }
+      if (window._zbPendingState) {
+        console.log('[ZB] Draining queued state_update');
+        onStateChange(window._zbPendingState);
+        const s = window._zbPendingState;
+        if (s.phase && s.phase !== CS.currentPhase) onPhaseChange(s.phase, s.activePlayer);
+        else if (s.activePlayer && s.activePlayer !== CS.activePlayerId) {
+          CS.activePlayerId = s.activePlayer;
+          updateTurnBanner();
+          renderHand();
+        }
+        window._zbPendingState = null;
+      }
+      renderHand();
+    }, 100);
   }
 
   function onPhaseChange(phase, activePlayerId) {
