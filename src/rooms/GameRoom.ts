@@ -130,9 +130,9 @@ export class GameRoom extends Room<GameRoomState> {
     return this.seatMap.get(sessionId) ?? "p1";
   }
 
-  private getSessionBySeat(seat: "p1" | "p2"): string {
+  private getSessionBySeat(seat: "p1" | "p2"): string | null {
     for (const [sid, s] of this.seatMap) { if (s === seat) return sid; }
-    return "";
+    return null;
   }
 
   private getActiveSeat(): "p1" | "p2" {
@@ -167,9 +167,10 @@ export class GameRoom extends Room<GameRoomState> {
           const mySeat  = this.getSeat(client.sessionId);
           if (!mySeat) { console.error('[GameRoom] broadcastStateUpdate: no seat for', client.sessionId); return; }
           const myId    = client.sessionId;
-          const oppId   = this.getSessionBySeat(this.getOtherSeat(mySeat));
+          const oppSeat = this.getOtherSeat(mySeat);
+          const oppId   = this.getSessionBySeat(oppSeat);
           const me      = this.gs.players.get(myId);
-          const opp     = oppId ? this.gs.players.get(oppId) : null;
+          const opp     = (oppId && oppId.length > 0) ? this.gs.players.get(oppId) : null;
 
           client.send("state_update", {
             state: {
@@ -213,7 +214,7 @@ export class GameRoom extends Room<GameRoomState> {
         username:        p.displayName,
         hp:              p.empire?.currentHp ?? 20,
         essence:         { n: p.essence?.neutral ?? 0, f: p.essence?.fire ?? 0, w: p.essence?.water ?? 0 },
-        hand:            Array.from(p.hand || []),
+        hand:            p.hand ? [...p.hand] : [],
         unitDeckCount:   p.unitDeck?.length ?? 0,
         blitzDeckCount:  p.blitzDeck?.length ?? 0,
         discardCount:    p.discardPile?.length ?? 0,
@@ -229,16 +230,19 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   private serializePlayerForOpponent(p: PlayerState) {
-    return {
-      username:       p.displayName,
-      hp:             p.empire?.currentHp ?? 20,
-      unitDeckCount:  p.unitDeck.length,
-      blitzDeckCount: p.blitzDeck.length,
-      discardCount:   p.discardPile.length,
-      tileSetupComplete: p.tileSetupComplete,
-      empireSet:      p.empireSet,
-      // hand intentionally omitted — private information
-    };
+    try {
+      return {
+        username:       p.displayName ?? 'Player',
+        hp:             p.empire?.currentHp ?? 20,
+        unitDeckCount:  p.unitDeck?.length ?? 0,
+        blitzDeckCount: p.blitzDeck?.length ?? 0,
+        discardCount:   p.discardPile?.length ?? 0,
+        tileSetupComplete: p.tileSetupComplete ?? false,
+        empireSet:      p.empireSet ?? false,
+      };
+    } catch(e) {
+      return { username: 'Player', hp: 20, unitDeckCount: 0, blitzDeckCount: 0, discardCount: 0 };
+    }
   }
 
   private serializeUnits(viewerSeat: "p1" | "p2") {
@@ -261,9 +265,11 @@ export class GameRoom extends Room<GameRoomState> {
 
   private serializeTiles() {
     const tiles: Record<string, any> = {};
-    this.gs.tiles.forEach((t: Tile, id: string) => {
-      tiles[id] = { tileType: t.tileType, revealed: t.revealed, occupiedBy: t.occupiedBy };
-    });
+    try {
+      this.gs.tiles.forEach((t: Tile, id: string) => {
+        if (t && id) tiles[id] = { tileType: t.tileType, revealed: t.revealed, occupiedBy: t.occupiedBy };
+      });
+    } catch(e) { console.error('[GameRoom] serializeTiles error:', e); }
     return tiles;
   }
 
