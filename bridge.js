@@ -108,7 +108,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (window.HexScene) {
         window.HexScene._clearHighlights();
         tileIds.forEach(id => {
-          const tile = window.HexScene.tiles.find(t => t.id === id);
+          const tile = window.HexScene.tiles.find(t => t.id === numId || String(t.id) === String(id));
           if (tile) tile.highlight = 2; // HL.MOVE
         });
         window.HexScene._refreshAll();
@@ -124,7 +124,7 @@ document.addEventListener('DOMContentLoaded', function () {
       if (window.HexScene) {
         window.HexScene._clearHighlights();
         tileIds.forEach(id => {
-          const tile = window.HexScene.tiles.find(t => t.id === id);
+          const tile = window.HexScene.tiles.find(t => String(t.id) === String(id));
           if (tile) tile.highlight = 3; // HL.ATTACK
         });
         window.HexScene._refreshAll();
@@ -245,7 +245,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
       if (window.HexScene) {
         tileIds.forEach(id => {
-          const tile = window.HexScene.tiles.find(t => t.id === id);
+          const tile = window.HexScene.tiles.find(t => String(t.id) === String(id));
           // Revealed tiles that were hidden become neutral by default
           // The server should send a state_update with the real type
           if (tile && tile.type === 'hidden') tile.type = 'neutral';
@@ -1018,13 +1018,20 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   function applyUnitState(units) {
-    if (!window.HexScene) return;
-    // Clear existing then re-apply
-    // Keep existing tokens, update positions
-    const incoming = Object.values(units);
+    if (!window.HexScene || !units) return;
+    // Handle both array (from state_update) and MapSchema (from onStateChange)
+    let incoming = [];
+    if (Array.isArray(units)) {
+      incoming = units.filter(Boolean);
+    } else if (typeof units.forEach === 'function') {
+      units.forEach(u => { if (u) incoming.push(u); });
+    } else {
+      incoming = Object.values(units).filter(Boolean);
+    }
     incoming.forEach(u => {
-      const existing = window.HexScene.gameState.units.find(gu => gu.id === u.instanceId);
-      const owner    = u.ownerId === CS.mySeat ? 'player' : 'opponent';
+      if (!u || !u.instanceId) return; // skip undefined/malformed entries
+      const existing = window.HexScene.gameState?.units?.find(gu => gu.id === u.instanceId);
+      const owner    = (u.ownerId === CS.mySessionId || u.owner === 'player' || u.owner === CS.mySeat) ? 'player' : 'opponent';
       if (existing) {
         existing.hp       = u.currentHp;
         existing.tileId   = u.tileId;
@@ -1126,14 +1133,14 @@ document.addEventListener('DOMContentLoaded', function () {
         renderHand(); // refresh counts
 
         // Send to server
-        send('place_tile', { tileId: tile.id, tileType: serverType });
+        send('place_tile', { tileId: String(tile.id), tileType: serverType });
         logCombat('⬡ Placed ' + serverType + ' tile', 's');
         return;
       }
 
       // During empire placement
       if ((CS.currentPhase||'').toLowerCase() === 'setup_empire' && isMyTurn()) {
-        send('place_empire', { tileId: tile.id });
+        send('place_empire', { tileId: String(tile.id) });
         return;
       }
 
@@ -1471,7 +1478,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
           // Update board for both players
           if (window.HexScene) {
-            const tile = window.HexScene.tiles.find(t => t.id === msg.tileId);
+            const tile = window.HexScene.tiles.find(t => String(t.id) === String(msg.tileId));
             if (tile) {
               tile.type = msg.tileType;
               const idx = window.HexScene.tiles.indexOf(tile);
