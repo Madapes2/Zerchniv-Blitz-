@@ -1121,6 +1121,10 @@ document.addEventListener('DOMContentLoaded', function () {
         // Determine correct type — fire and water both come from elemental budget
         const serverType = CS.selectedTileType; // 'neutral', 'fire', or 'water'
 
+        // Prevent placing on an already-placed tile
+        if (tile._zbPlaced) return;
+        tile._zbPlaced = true; // mark immediately to prevent double-send
+
         // Optimistic local render
         tile.type = serverType;
         window.HexScene._drawTile(tile, window.HexScene.tileGfx[window.HexScene.tiles.indexOf(tile)]);
@@ -1133,6 +1137,7 @@ document.addEventListener('DOMContentLoaded', function () {
         renderHand(); // refresh counts
 
         // Send to server
+        console.log('[ZB] Sending place_tile:', String(tile.id), serverType, '| room:', !!_getRoom());
         send('place_tile', { tileId: String(tile.id), tileType: serverType });
         logCombat('⬡ Placed ' + serverType + ' tile', 's');
         return;
