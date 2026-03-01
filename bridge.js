@@ -586,7 +586,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // ── IS MY TURN ────────────────────────────────────────────────
   function isMyTurn() {
-    return CS.mySeat && CS.activePlayerId && CS.mySeat === CS.activePlayerId;
+    if (!CS.mySeat || !CS.activePlayerId) return false;
+    // Compare seat labels — both should be "p1" or "p2"
+    return CS.mySeat.toLowerCase() === CS.activePlayerId.toLowerCase();
   }
 
   // ── SEND TO SERVER ────────────────────────────────────────────
@@ -766,7 +768,7 @@ document.addEventListener('DOMContentLoaded', function () {
   // ── TILE SETUP BAR ────────────────────────────────────────────
   function _renderSetupBar(area) {
     const myTurn   = isMyTurn();
-    const isEmpire = CS.currentPhase === 'SETUP_EMPIRE';
+    const isEmpire = (CS.currentPhase || '').toLowerCase() === 'setup_empire';
 
     const bar = document.createElement('div');
     bar.style.cssText = 'display:flex;align-items:center;gap:1rem;padding:0 1rem;width:100%;height:100%';
@@ -881,7 +883,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (playBtn) {
       const cost    = (def.essenceCost?.neutral ?? 0) + (def.essenceCost?.fire ?? 0) + (def.essenceCost?.water ?? 0);
       const totalEss = CS.essence.neutral + CS.essence.fire + CS.essence.water;
-      const myMain  = isMyTurn() && CS.currentPhase === 'MAIN';
+      const myMain  = isMyTurn() && (CS.currentPhase||'').toLowerCase() === 'main';
       const canPlay = myMain && totalEss >= cost;
 
       playBtn.textContent = def.type === 'unit' ? '⬡ Deploy Unit'
@@ -904,7 +906,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // ── UNIT DEPLOYMENT ──────────────────────────────────────────
   function beginDeploy(cardId, def) {
-    if (!isMyTurn() || CS.currentPhase !== 'MAIN') {
+    if (!isMyTurn() || (CS.currentPhase||'').toLowerCase() !== 'main') {
       toast('Not your Main Phase!');
       return;
     }
@@ -1023,7 +1025,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const origClick = window.HexScene._onTileClick.bind(window.HexScene);
     window.HexScene._onTileClick = function (tile) {
       // During tile placement
-      if (CS.currentPhase === 'SETUP_TILES' && CS.selectedTileType && isMyTurn()) {
+      if ((CS.currentPhase||'').toLowerCase() === 'setup_tiles' && CS.selectedTileType && isMyTurn()) {
         // Determine correct type — fire and water both come from elemental budget
         const serverType = CS.selectedTileType; // 'neutral', 'fire', or 'water'
 
@@ -1044,7 +1046,7 @@ document.addEventListener('DOMContentLoaded', function () {
       }
 
       // During empire placement
-      if (CS.currentPhase === 'SETUP_EMPIRE' && isMyTurn()) {
+      if ((CS.currentPhase||'').toLowerCase() === 'setup_empire' && isMyTurn()) {
         send('place_empire', { tileId: tile.id });
         return;
       }
@@ -1062,14 +1064,14 @@ document.addEventListener('DOMContentLoaded', function () {
       endBtn.onclick = e => {
         e.preventDefault();
         if (!isMyTurn()) { toast("It's not your turn!"); return; }
-        if (CS.currentPhase === 'SETUP_TILES') {
+        if ((CS.currentPhase||'').toLowerCase() === 'setup_tiles') {
           CS.selectedTileType = null;
           send('end_tile_placement', {});
           toast('Tiles submitted — waiting for opponent…');
           renderHand();
-        } else if (CS.currentPhase === 'DRAW') {
+        } else if ((CS.currentPhase||'').toLowerCase() === 'draw') {
           toast('Draw a card first!');
-        } else if (CS.currentPhase === 'MAIN') {
+        } else if ((CS.currentPhase||'').toLowerCase() === 'main') {
           send('end_turn', {});
           if (window.HexScene) window.HexScene._clearSelection();
         } else {
@@ -1082,14 +1084,14 @@ document.addEventListener('DOMContentLoaded', function () {
     const du = document.querySelector('.mdk.unit');
     const db = document.querySelector('.mdk.blitz');
     if (du) du.onclick = () => {
-      if (!isMyTurn() || CS.currentPhase !== 'DRAW') {
+      if (!isMyTurn() || (CS.currentPhase||'').toLowerCase() !== 'draw') {
         toast(isMyTurn() ? 'Not Draw Phase' : "Not your turn!"); return;
       }
       send('draw_card', { deck: 'unit' });
       stopDeckPulse();
     };
     if (db) db.onclick = () => {
-      if (!isMyTurn() || CS.currentPhase !== 'DRAW') {
+      if (!isMyTurn() || (CS.currentPhase||'').toLowerCase() !== 'draw') {
         toast(isMyTurn() ? 'Not Draw Phase' : "Not your turn!"); return;
       }
       send('draw_card', { deck: 'blitz' });
@@ -1116,6 +1118,13 @@ document.addEventListener('DOMContentLoaded', function () {
     console.log('[SERVER CLIENT] Game start — my seat:', seat);
     logCombat('⬡ Game started — placing tiles', 's');
 
+    // Read active player from state — server uses "activePlayer" (seat label)
+    // Default to "p1" if not provided (p1 always goes first in tile placement)
+    const activeSeat = initialState?.activePlayer
+                    || initialState?.activePlayerId
+                    || 'p1';
+    CS.activePlayerId = activeSeat;
+
     // Resize Phaser now that match screen is visible
     setTimeout(_resizePhaser, 200);
     setTimeout(() => {
@@ -1123,19 +1132,20 @@ document.addEventListener('DOMContentLoaded', function () {
       _hookPhaserTileClick();
     }, 300);
 
-    // Set initial phase from state if provided
-    if (initialState?.currentPhase) {
-      onPhaseChange(initialState.currentPhase, initialState.activePlayerId);
-    } else {
-      onPhaseChange('SETUP_TILES', null);
-    }
+    // Set phase — use whatever field name the server sent
+    const phase = initialState?.phase
+               || initialState?.currentPhase
+               || 'setup_tiles';
+    onPhaseChange(phase, activeSeat);
 
     renderHand();
   }
 
   function onPhaseChange(phase, activePlayerId) {
-    CS.currentPhase   = phase;
-    CS.activePlayerId = activePlayerId || CS.activePlayerId;
+    CS.currentPhase = phase;
+    // Only update activePlayerId if a real value is provided
+    if (activePlayerId) CS.activePlayerId = activePlayerId;
+    console.log('[SERVER CLIENT] Phase:', phase, '| Active:', CS.activePlayerId, '| Me:', CS.mySeat, '| My turn:', isMyTurn());
 
     updatePhaseUI(phase);
     updateTurnBanner();
@@ -1188,13 +1198,15 @@ document.addEventListener('DOMContentLoaded', function () {
     // Called when Colyseus patches arrive
     if (!state) return;
 
-    // Phase / active player
-    if (state.currentPhase !== undefined) {
-      const phaseChanged = state.currentPhase !== CS.currentPhase;
-      CS.currentPhase   = state.currentPhase;
-      CS.activePlayerId = state.activePlayerId;
-      if (phaseChanged) onPhaseChange(state.currentPhase, state.activePlayerId);
-      else { updateTurnBanner(); updatePhaseUI(state.currentPhase); }
+    // Phase / active player — server may use either field name
+    const incomingPhase  = state.currentPhase ?? state.phase;
+    const incomingActive = state.activePlayerId ?? state.activePlayer;
+    if (incomingPhase !== undefined) {
+      const phaseChanged = incomingPhase !== CS.currentPhase;
+      CS.currentPhase = incomingPhase;
+      if (incomingActive) CS.activePlayerId = incomingActive;
+      if (phaseChanged) onPhaseChange(incomingPhase, incomingActive);
+      else { updateTurnBanner(); updatePhaseUI(incomingPhase); }
     }
 
     // My essence (find my player state)
