@@ -75,6 +75,7 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   onJoin(client: Client, options: any) {
+    try {
     const player = new PlayerState();
     player.sessionId = client.sessionId;
     player.displayName = options?.displayName ?? `Player ${this.gs.players.size + 1}`;
@@ -93,8 +94,9 @@ export class GameRoom extends Room<GameRoomState> {
     shuffleDeck(player.blitzDeck);
 
     // Set tile budgets (19 neutral, 10 elemental per player for 58-tile board)
-    player.neutralTilesRemaining   = NEUTRAL_TILES_PER_PLAYER   ?? 19;
-    player.elementalTilesRemaining = ELEMENTAL_TILES_PER_PLAYER  ?? 10;
+    // 19 neutral + 10 elemental (5 fire + 5 water) per player for 58-tile board
+    player.neutralTilesRemaining   = (typeof NEUTRAL_TILES_PER_PLAYER   !== 'undefined') ? NEUTRAL_TILES_PER_PLAYER   : 19;
+    player.elementalTilesRemaining = (typeof ELEMENTAL_TILES_PER_PLAYER  !== 'undefined') ? ELEMENTAL_TILES_PER_PLAYER  : 10;
 
     this.gs.players.set(client.sessionId, player);
     addLog(this.gs, `${player.displayName} joined as ${seat}.`);
@@ -102,6 +104,7 @@ export class GameRoom extends Room<GameRoomState> {
     if (this.clients.length === 2) {
       this.startGame();
     }
+    } catch(e) { console.error('[GameRoom] onJoin error:', e); }
   }
 
   onLeave(client: Client) {
@@ -293,6 +296,7 @@ export class GameRoom extends Room<GameRoomState> {
   // ============================================================
 
   private handleMessage(client: Client, msg: Msg) {
+    try {
     const playerId = client.sessionId;
     const player   = this.gs.players.get(playerId);
     if (!player) return;
@@ -383,6 +387,7 @@ export class GameRoom extends Room<GameRoomState> {
         // End phase is server-driven
         break;
     }
+    } catch(e) { console.error('[GameRoom] handleMessage error:', e); client.send('error', { code: 'SERVER_ERROR', message: String(e) }); }
   }
 
   // ============================================================
@@ -467,7 +472,7 @@ export class GameRoom extends Room<GameRoomState> {
 
     player.empire.ownerId   = client.sessionId;
     player.empire.tileId    = tileId;
-    player.empire.currentHp = EMPIRE_MAX_HP;
+    player.empire.currentHp = (typeof EMPIRE_MAX_HP !== 'undefined') ? EMPIRE_MAX_HP : 20;
     player.empire.isPlaced  = true;
     player.empireSet        = true;
 
@@ -708,7 +713,8 @@ export class GameRoom extends Room<GameRoomState> {
     unit.ownerId           = client.sessionId;
     unit.tileId            = spawnTileId;
     unit.currentHp         = cardDef.hp;
-    unit.hasDevelopmentRest = this.gs.roundNumber > (FIRST_PLAYER_NO_DEV_REST_ROUNDS ?? 2);
+    const noRestRounds = (typeof FIRST_PLAYER_NO_DEV_REST_ROUNDS !== 'undefined') ? FIRST_PLAYER_NO_DEV_REST_ROUNDS : 2;
+    unit.hasDevelopmentRest = this.gs.roundNumber > noRestRounds;
 
     this.gs.units.set(unit.instanceId, unit);
 
@@ -837,7 +843,7 @@ export class GameRoom extends Room<GameRoomState> {
     structure.cardId       = cardId;
     structure.ownerId      = client.sessionId;
     structure.tileId       = tileId;
-    structure.currentHp    = STRUCTURE_MAX_HP;
+    structure.currentHp    = (typeof STRUCTURE_MAX_HP !== 'undefined') ? STRUCTURE_MAX_HP : 10;
 
     this.gs.structures.set(structure.instanceId, structure);
     tile.occupiedBy = structure.instanceId;
