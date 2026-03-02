@@ -1503,7 +1503,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         // Also listen for direct messages (hand updates, errors)
         room.onMessage('hand_update',    msg => onHandUpdate(msg.cards));
-        room.onMessage('phase_change',   msg => onPhaseChange(msg.phase, msg.activePlayerId));
+        room.onMessage('phase_change',   msg => onPhaseChange(msg.phase, msg.activePlayer));
         room.onMessage('tile_placed', msg => {
           logCombat('⬡ ' + msg.byPlayer + ' placed ' + msg.tileType + ' tile', 's');
 
