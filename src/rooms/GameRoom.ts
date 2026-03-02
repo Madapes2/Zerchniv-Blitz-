@@ -76,39 +76,37 @@ export class GameRoom extends Room<GameRoomState> {
 
   onJoin(client: Client, options: any) {
     try {
-    const player = new PlayerState();
-    player.sessionId = client.sessionId;
-    player.displayName = options?.displayName ?? `Player ${this.gs.players.size + 1}`;
+      const player = new PlayerState();
+      player.sessionId = client.sessionId;
+      player.displayName = options?.displayName ?? `Player ${this.gs.players.size + 1}`;
 
-    // Assign seat labels in join order
-    const seat: "p1" | "p2" = this.seatMap.size === 0 ? "p1" : "p2";
-    this.seatMap.set(client.sessionId, seat);
-    (player as any).seat = seat;
+      // Assign seat labels in join order
+      const seat: "p1" | "p2" = this.seatMap.size === 0 ? "p1" : "p2";
+      this.seatMap.set(client.sessionId, seat);
+      (player as any).seat = seat;
 
-    // Load decks from options
-    if (options?.unitDeck)  options.unitDeck.forEach((id: string)  => player.unitDeck.push(id));
-    if (options?.blitzDeck) options.blitzDeck.forEach((id: string) => player.blitzDeck.push(id));
-    if (options?.extraDeck) options.extraDeck.forEach((id: string) => player.extraDeck.push(id));
+      // Load decks from options
+      if (options?.unitDeck)  options.unitDeck.forEach((id: string)  => player.unitDeck.push(id));
+      if (options?.blitzDeck) options.blitzDeck.forEach((id: string) => player.blitzDeck.push(id));
+      if (options?.extraDeck) options.extraDeck.forEach((id: string) => player.extraDeck.push(id));
 
-    shuffleDeck(player.unitDeck);
-    shuffleDeck(player.blitzDeck);
+      shuffleDeck(player.unitDeck);
+      shuffleDeck(player.blitzDeck);
 
-    // Set tile budgets (19 neutral, 10 elemental per player for 58-tile board)
-    // 19 neutral + 10 elemental (5 fire + 5 water) per player for 58-tile board
-    // Guard: only assign if the schema field exists on PlayerState
-    if ('neutralTilesRemaining'   in player) player.neutralTilesRemaining   = (typeof NEUTRAL_TILES_PER_PLAYER   !== 'undefined') ? NEUTRAL_TILES_PER_PLAYER   : 19;
-    if ('elementalTilesRemaining' in player) player.elementalTilesRemaining = (typeof ELEMENTAL_TILES_PER_PLAYER  !== 'undefined') ? ELEMENTAL_TILES_PER_PLAYER  : 10;
-    // Store in a side-channel map if schema fields are missing
-    (this as any)._tileBudgets = (this as any)._tileBudgets || new Map();
-    const budget = { neutral: 19, elemental: 10 };
-    (this as any)._tileBudgets.set(client.sessionId, budget);
+      // Set tile budgets (19 neutral, 10 elemental per player for 58-tile board)
+      if ('neutralTilesRemaining'   in player) player.neutralTilesRemaining   = (typeof NEUTRAL_TILES_PER_PLAYER   !== 'undefined') ? NEUTRAL_TILES_PER_PLAYER   : 19;
+      if ('elementalTilesRemaining' in player) player.elementalTilesRemaining = (typeof ELEMENTAL_TILES_PER_PLAYER !== 'undefined') ? ELEMENTAL_TILES_PER_PLAYER : 10;
+      // Side-channel budget map (fallback if schema fields missing)
+      (this as any)._tileBudgets = (this as any)._tileBudgets || new Map();
+      (this as any)._tileBudgets.set(client.sessionId, { neutral: 19, elemental: 10 });
 
-    this.gs.players.set(client.sessionId, player);
-    addLog(this.gs, `${player.displayName} joined as ${seat}.`);
+      this.gs.players.set(client.sessionId, player);
+      console.log(`[GameRoom] onJoin — seat: ${seat} | sessionId: ${client.sessionId} | total players: ${this.gs.players.size}`);
+      addLog(this.gs, `${player.displayName} joined as ${seat}.`);
 
-    if (this.clients.length === 2) {
-      this.startGame();
-    }
+      if (this.clients.length === 2) {
+        this.startGame();
+      }
     } catch(e) { console.error('[GameRoom] onJoin error:', e); }
   }
 
@@ -117,8 +115,6 @@ export class GameRoom extends Room<GameRoomState> {
     const seat = this.seatMap.get(client.sessionId) ?? "?";
     addLog(this.gs, `${p?.displayName ?? client.sessionId} (${seat}) disconnected.`);
     this.gs.players.delete(client.sessionId);
-
-    // Notify remaining client
     this.broadcast("player_left", { seat });
   }
 
@@ -147,14 +143,15 @@ export class GameRoom extends Room<GameRoomState> {
   // BROADCAST HELPERS — keep network.js contract
   // ============================================================
 
-  /** Broadcast phase_change to all clients using seat labels, not sessionIds. */
+  /** Broadcast phase_change to all clients using seat labels. */
   private broadcastPhaseChange() {
     const activeSeat = this.getActiveSeat();
     const phaseStr   = this.phaseToString(this.gs.currentPhase);
+    console.log(`[GameRoom] broadcastPhaseChange — phase: ${phaseStr} | activePlayer: ${activeSeat} | activePlayerId: ${this.gs.activePlayerId}`);
     this.broadcast("phase_change", {
       phase:        phaseStr,
       turn:         this.gs.roundNumber,
-      activePlayer: activeSeat,    // "p1" or "p2" — what network.js expects
+      activePlayer: activeSeat,   // always "p1" or "p2"
     });
   }
 
@@ -165,7 +162,6 @@ export class GameRoom extends Room<GameRoomState> {
       this.clients.forEach(client => {
         try {
           const mySeat  = this.getSeat(client.sessionId);
-          if (!mySeat) { console.error('[GameRoom] broadcastStateUpdate: no seat for', client.sessionId); return; }
           const myId    = client.sessionId;
           const oppSeat = this.getOtherSeat(mySeat);
           const oppId   = this.getSessionBySeat(oppSeat);
@@ -179,11 +175,11 @@ export class GameRoom extends Room<GameRoomState> {
               activePlayer: activeSeat,
               players: {
                 [mySeat]: me ? this.serializePlayerForSelf(me) : null,
-                [this.getOtherSeat(mySeat)]: opp ? this.serializePlayerForOpponent(opp) : null,
+                [oppSeat]: opp ? this.serializePlayerForOpponent(opp) : null,
               },
-              units:      this.serializeUnits(mySeat),
-              tiles:      this.serializeTiles(),
-              empires:    this.serializeEmpires(),
+              units:   this.serializeUnits(mySeat),
+              tiles:   this.serializeTiles(),
+              empires: this.serializeEmpires(),
             }
           });
         } catch(innerE) {
@@ -196,7 +192,6 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   private phaseToString(phase: any): string {
-    // Map Phase enum values to strings network.js understands
     const map: Record<string, string> = {
       [Phase.SETUP_TILES]:  "setup_tiles",
       [Phase.SETUP_EMPIRE]: "setup_empire",
@@ -250,14 +245,14 @@ export class GameRoom extends Room<GameRoomState> {
     this.gs.units.forEach((u: UnitInstance) => {
       const ownerSeat = this.getSeat(u.ownerId);
       units.push({
-        instanceId:         u.instanceId,
-        cardId:             u.cardId,
-        owner:              ownerSeat,
-        tileId:             u.tileId,
-        currentHp:          u.currentHp,
-        hasMovedThisTurn:   u.hasMovedThisTurn,
+        instanceId:          u.instanceId,
+        cardId:              u.cardId,
+        owner:               ownerSeat,
+        tileId:              u.tileId,
+        currentHp:           u.currentHp,
+        hasMovedThisTurn:    u.hasMovedThisTurn,
         hasAttackedThisTurn: u.hasAttackedThisTurn,
-        hasDevelopmentRest: u.hasDevelopmentRest,
+        hasDevelopmentRest:  u.hasDevelopmentRest,
       });
     });
     return units;
@@ -288,175 +283,189 @@ export class GameRoom extends Room<GameRoomState> {
 
   private startGame() {
     try {
-    const playerIds = Array.from(this.gs.players.keys());
-    const flip = Math.random() < 0.5;
-    this.gs.activePlayerId = flip ? playerIds[0] : playerIds[1];
-    this.gs.currentPhase   = String(Phase.SETUP_TILES || "SETUP_TILES");
-    this.gs.roundNumber    = 1;
+      const playerIds = Array.from(this.gs.players.keys());
+      const flip = Math.random() < 0.5;
+      this.gs.activePlayerId = flip ? playerIds[0] : playerIds[1];
 
-    addLog(this.gs, `Game started! ${this.getPlayerName(this.gs.activePlayerId)} places tiles first.`);
+      // FIX: use String(Phase.SETUP_TILES) directly — never use || fallback
+      // which breaks when Phase.SETUP_TILES = 0 (falsy)
+      this.gs.currentPhase = String(Phase.SETUP_TILES);
+      this.gs.roundNumber  = 1;
 
-    // Send game_start to each client with their seat label
-    this.clients.forEach(client => {
-      const seat = this.getSeat(client.sessionId);
-      client.send("game_start", {
-        yourSeat: seat,
-        state: {
-          phase:        "setup_tiles",
-          turn:         1,
-          activePlayer: this.getActiveSeat(),
-          players: {
-            [seat]: this.serializePlayerForSelf(this.gs.players.get(client.sessionId)!),
-            [this.getOtherSeat(seat)]: null,
-          },
-          units:  [],
-          tiles:  {},
-          empires: {},
-        }
+      const activeSeat = this.getActiveSeat();
+      console.log(`[GameRoom] startGame — activePlayerId: ${this.gs.activePlayerId} | activeSeat: ${activeSeat} | phase: ${this.phaseToString(this.gs.currentPhase)}`);
+      addLog(this.gs, `Game started! ${this.getPlayerName(this.gs.activePlayerId)} places tiles first.`);
+
+      // Send game_start to each client individually with their seat label
+      this.clients.forEach(client => {
+        const seat = this.getSeat(client.sessionId);
+        console.log(`[GameRoom] Sending game_start to ${seat} (${client.sessionId})`);
+        client.send("game_start", {
+          yourSeat: seat,
+          state: {
+            phase:        "setup_tiles",
+            turn:         1,
+            activePlayer: activeSeat,
+            players: {
+              [seat]: this.serializePlayerForSelf(this.gs.players.get(client.sessionId)!),
+              [this.getOtherSeat(seat)]: null,
+            },
+            units:   [],
+            tiles:   {},
+            empires: {},
+          }
+        });
       });
-    });
     } catch(e) { console.error('[GameRoom] startGame error:', e); }
   }
 
-// ============================================================
+  // ============================================================
   // MESSAGE ROUTER
   // ============================================================
 
   private handleMessage(client: Client, msg: Msg) {
     try {
-    const playerId = client.sessionId;
-    const player   = this.gs.players.get(playerId);
-    if (!player) return;
+      const playerId = client.sessionId;
+      const player   = this.gs.players.get(playerId);
+      if (!player) return;
 
-    // Reaction window
-    if (this.gs.awaitingReaction) {
-      if ((msg.type === "react_blitz" || msg.type === "play_reaction") && playerId === this.gs.reactionFromPlayerId) {
-        this.handleReactBlitz(client, (msg as any).cardId);
-      } else if (msg.type === "pass_reaction" && playerId === this.gs.reactionFromPlayerId) {
-        this.resolveReactionWindow();
+      // Reaction window
+      if (this.gs.awaitingReaction) {
+        if ((msg.type === "react_blitz" || msg.type === "play_reaction") && playerId === this.gs.reactionFromPlayerId) {
+          this.handleReactBlitz(client, (msg as any).cardId);
+        } else if (msg.type === "pass_reaction" && playerId === this.gs.reactionFromPlayerId) {
+          this.resolveReactionWindow();
+        }
+        return;
       }
-      return;
-    }
 
-    // State sync request — client can ask for current state at any time (e.g. after reconnect)
-    if (msg.type === "request_state") {
-      try {
-        const seat    = this.getSeat(client.sessionId);
-        const myId    = client.sessionId;
-        const oppSeat = this.getOtherSeat(seat);
-        const oppId   = this.getSessionBySeat(oppSeat);
-        const me      = this.gs.players.get(myId);
-        const opp     = oppId ? this.gs.players.get(oppId) : null;
-        client.send("state_update", {
-          state: {
-            phase:        this.phaseToString(this.gs.currentPhase),
+      // State sync request — always allowed
+      if (msg.type === "request_state") {
+        try {
+          const seat    = this.getSeat(client.sessionId);
+          const myId    = client.sessionId;
+          const oppSeat = this.getOtherSeat(seat);
+          const oppId   = this.getSessionBySeat(oppSeat);
+          const me      = this.gs.players.get(myId);
+          const opp     = oppId ? this.gs.players.get(oppId) : null;
+          const activeSeat = this.getActiveSeat();
+          const phaseStr   = this.phaseToString(this.gs.currentPhase);
+
+          console.log(`[GameRoom] request_state from ${seat} — phase: ${phaseStr} | activePlayer: ${activeSeat}`);
+
+          client.send("state_update", {
+            state: {
+              phase:        phaseStr,
+              turn:         this.gs.roundNumber,
+              activePlayer: activeSeat,
+              players: {
+                [seat]:    me  ? this.serializePlayerForSelf(me)      : null,
+                [oppSeat]: opp ? this.serializePlayerForOpponent(opp) : null,
+              },
+              units:   this.serializeUnits(seat),
+              tiles:   this.serializeTiles(),
+              empires: this.serializeEmpires(),
+            }
+          });
+          // Also send phase_change so client handlers fire
+          client.send("phase_change", {
+            phase:        phaseStr,
             turn:         this.gs.roundNumber,
-            activePlayer: this.getActiveSeat(),
-            players: {
-              [seat]:    me  ? this.serializePlayerForSelf(me)      : null,
-              [oppSeat]: opp ? this.serializePlayerForOpponent(opp) : null,
-            },
-            units:   this.serializeUnits(seat),
-            tiles:   this.serializeTiles(),
-            empires: this.serializeEmpires(),
+            activePlayer: activeSeat,
+          });
+        } catch(e) { console.error("[GameRoom] request_state error:", e); }
+        return;
+      }
+
+      // Info requests — always allowed
+      if (msg.type === "request_valid_moves" || msg.type === "request_moves") {
+        this.sendValidMoves(client, (msg as any).unitId);
+        return;
+      }
+      if (msg.type === "request_valid_targets" || msg.type === "request_targets") {
+        this.sendValidTargets(client, (msg as any).unitId, (msg as any).attackType ?? (msg as any).mode);
+        return;
+      }
+      if (msg.type === "send_chat") {
+        this.broadcast("chat_message", { sender: player.displayName, text: (msg as any).text });
+        return;
+      }
+      if (msg.type === "concede") {
+        this.handleConcede(client);
+        return;
+      }
+
+      // Normalize current phase to lowercase string
+      const currentPhaseStr = this.phaseToString(this.gs.currentPhase);
+      console.log(`[GameRoom] handleMessage: ${msg.type} | phase: ${currentPhaseStr} | activePlayer: ${this.gs.activePlayerId} | sender: ${client.sessionId} | senderSeat: ${this.getSeat(client.sessionId)}`);
+
+      switch (currentPhaseStr) {
+
+        case 'setup_tiles':
+          if (playerId !== this.gs.activePlayerId) {
+            console.log(`[GameRoom] setup_tiles: NOT your turn — active: ${this.gs.activePlayerId} | sender: ${playerId}`);
+            client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn to place tiles." });
+            return;
           }
-        });
-        client.send("phase_change", {
-          phase:        this.phaseToString(this.gs.currentPhase),
-          turn:         this.gs.roundNumber,
-          activePlayer: this.getActiveSeat(),
-        });
-      } catch(e) { console.error("[GameRoom] request_state error:", e); }
-      return;
+          if (msg.type === "place_tile")         this.handlePlaceTile(client, (msg as any).tileId, (msg as any).tileType);
+          if (msg.type === "end_tile_placement") this.handleEndTilePlacement(client);
+          break;
+
+        case 'setup_empire':
+          if (msg.type === "place_empire") this.handlePlaceEmpire(client, (msg as any).tileId);
+          break;
+
+        case 'standby':
+          // Server-driven — no client actions during standby
+          break;
+
+        case 'draw':
+          if (playerId !== this.gs.activePlayerId) {
+            client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
+            return;
+          }
+          if (msg.type === "draw_card") this.handleDrawCard(client, (msg as any).deck ?? (msg as any).deckType);
+          break;
+
+        case 'main':
+          if (playerId !== this.gs.activePlayerId) {
+            client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
+            return;
+          }
+          if (msg.type === "move_unit")
+            this.handleMoveUnit(client, (msg as any).unitId, (msg as any).toTile ?? (msg as any).targetTileId);
+          if (msg.type === "melee_attack")
+            this.handleMeleeAttack(client, (msg as any).attackerUnitId, (msg as any).targetId);
+          if (msg.type === "ranged_attack")
+            this.handleRangedAttack(client, (msg as any).attackerUnitId, (msg as any).targetId);
+          if (msg.type === "declare_attack")
+            this.handleDeclareAttack(client, (msg as any).unitId, (msg as any).targetTile, (msg as any).mode);
+          if (msg.type === "play_unit" || msg.type === "deploy_unit")
+            this.handlePlayUnit(client, (msg as any).cardId, (msg as any).spawnTileId ?? String((msg as any).tileIdx ?? ""));
+          if (msg.type === "play_blitz")
+            this.handlePlayBlitz(client, (msg as any).cardId, (msg as any).targetId);
+          if (msg.type === "play_structure" || msg.type === "deploy_structure")
+            this.handlePlayStructure(client, (msg as any).cardId, (msg as any).tileId ?? String((msg as any).tileIdx ?? ""));
+          if (msg.type === "place_builder")
+            this.handlePlaceBuilder(client, (msg as any).tileId);
+          if (msg.type === "use_terraform")
+            this.handleTerraform(client, (msg as any).unitId);
+          if (msg.type === "end_turn")
+            this.handleEndTurn(client);
+          break;
+
+        case 'end':
+          // End phase is server-driven
+          break;
+
+        default:
+          console.warn(`[GameRoom] handleMessage: unmatched phase: ${currentPhaseStr} | raw: ${this.gs.currentPhase} | msg: ${msg.type}`);
+          break;
+      }
+    } catch(e) {
+      console.error('[GameRoom] handleMessage error:', e);
+      client.send('error', { code: 'SERVER_ERROR', message: String(e) });
     }
-
-    // Info requests — always allowed
-    if (msg.type === "request_valid_moves" || msg.type === "request_moves") {
-      this.sendValidMoves(client, (msg as any).unitId);
-      return;
-    }
-    if (msg.type === "request_valid_targets" || msg.type === "request_targets") {
-      this.sendValidTargets(client, (msg as any).unitId, (msg as any).attackType ?? (msg as any).mode);
-      return;
-    }
-    if (msg.type === "send_chat") {
-      this.broadcast("chat_message", { sender: player.displayName, text: (msg as any).text });
-      return;
-    }
-    if (msg.type === "concede") {
-      this.handleConcede(client);
-      return;
-    }
-
-    // ── ROBUST PHASE MATCHING ──────────────────────────────────
-    // Phase enum may be numeric (0,1,2...) or string. Normalize to
-    // the lowercase string form that phaseToString() produces.
-    const currentPhaseStr = this.phaseToString(this.gs.currentPhase);
-    console.log('[GameRoom] handleMessage:', msg.type, '| phase:', currentPhaseStr, '| rawPhase:', this.gs.currentPhase, '| activePlayer:', this.gs.activePlayerId, '| sender:', client.sessionId);
-
-    switch (currentPhaseStr) {
-
-      case 'setup_tiles':
-        if (playerId !== this.gs.activePlayerId) {
-          client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn to place tiles." });
-          return;
-        }
-        if (msg.type === "place_tile")         this.handlePlaceTile(client, (msg as any).tileId, (msg as any).tileType);
-        if (msg.type === "end_tile_placement") this.handleEndTilePlacement(client);
-        break;
-
-      case 'setup_empire':
-        if (msg.type === "place_empire") this.handlePlaceEmpire(client, (msg as any).tileId);
-        break;
-
-      case 'standby':
-        // Server-driven — no client actions during standby
-        break;
-
-      case 'draw':
-        if (playerId !== this.gs.activePlayerId) {
-          client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
-          return;
-        }
-        if (msg.type === "draw_card") this.handleDrawCard(client, (msg as any).deck ?? (msg as any).deckType);
-        break;
-
-      case 'main':
-        if (playerId !== this.gs.activePlayerId) {
-          client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
-          return;
-        }
-        if (msg.type === "move_unit")
-          this.handleMoveUnit(client, (msg as any).unitId, (msg as any).toTile ?? (msg as any).targetTileId);
-        if (msg.type === "melee_attack")
-          this.handleMeleeAttack(client, (msg as any).attackerUnitId, (msg as any).targetId);
-        if (msg.type === "ranged_attack")
-          this.handleRangedAttack(client, (msg as any).attackerUnitId, (msg as any).targetId);
-        if (msg.type === "declare_attack")
-          this.handleDeclareAttack(client, (msg as any).unitId, (msg as any).targetTile, (msg as any).mode);
-        if (msg.type === "play_unit" || msg.type === "deploy_unit")
-          this.handlePlayUnit(client, (msg as any).cardId, (msg as any).spawnTileId ?? String((msg as any).tileIdx ?? ""));
-        if (msg.type === "play_blitz")
-          this.handlePlayBlitz(client, (msg as any).cardId, (msg as any).targetId);
-        if (msg.type === "play_structure" || msg.type === "deploy_structure")
-          this.handlePlayStructure(client, (msg as any).cardId, (msg as any).tileId ?? String((msg as any).tileIdx ?? ""));
-        if (msg.type === "place_builder")
-          this.handlePlaceBuilder(client, (msg as any).tileId);
-        if (msg.type === "use_terraform")
-          this.handleTerraform(client, (msg as any).unitId);
-        if (msg.type === "end_turn")
-          this.handleEndTurn(client);
-        break;
-
-      case 'end':
-        // End phase is server-driven
-        break;
-
-      default:
-        console.warn('[GameRoom] handleMessage: unmatched phase:', currentPhaseStr, '| raw:', this.gs.currentPhase, '| msg:', msg.type);
-        break;
-    }
-    } catch(e) { console.error('[GameRoom] handleMessage error:', e); client.send('error', { code: 'SERVER_ERROR', message: String(e) }); }
   }
 
   // ============================================================
@@ -465,94 +474,113 @@ export class GameRoom extends Room<GameRoomState> {
 
   private handlePlaceTile(client: Client, tileId: string, tileType: string) {
     try {
-    // Validate inputs
-    if (!tileId || typeof tileId !== 'string') {
-      console.error('[GameRoom] handlePlaceTile: invalid tileId', tileId);
-      client.send("error", { code: "BAD_REQUEST", message: "Invalid tile id." });
-      return;
-    }
-    const validTypes = ["neutral", "fire", "water"];
-    if (!validTypes.includes(tileType)) {
-      console.error('[GameRoom] handlePlaceTile: invalid tileType', tileType);
-      client.send("error", { code: "BAD_REQUEST", message: "Invalid tile type." });
-      return;
-    }
+      if (!tileId || typeof tileId !== 'string') {
+        console.error('[GameRoom] handlePlaceTile: invalid tileId', tileId);
+        client.send("error", { code: "BAD_REQUEST", message: "Invalid tile id." });
+        return;
+      }
+      const validTypes = ["neutral", "fire", "water"];
+      if (!validTypes.includes(tileType)) {
+        console.error('[GameRoom] handlePlaceTile: invalid tileType', tileType);
+        client.send("error", { code: "BAD_REQUEST", message: "Invalid tile type." });
+        return;
+      }
 
-    const player = this.gs.players.get(client.sessionId);
-    if (!player) { console.error('[GameRoom] handlePlaceTile: no player'); return; }
+      const player = this.gs.players.get(client.sessionId);
+      if (!player) { console.error('[GameRoom] handlePlaceTile: no player'); return; }
 
-    if (this.gs.tiles.has(tileId)) {
-      client.send("error", { code: "TILE_EXISTS", message: "Tile already placed." });
-      return;
-    }
+      if (this.gs.tiles.has(tileId)) {
+        client.send("error", { code: "TILE_EXISTS", message: "Tile already placed." });
+        return;
+      }
 
-    // Use schema fields if available, otherwise use side-channel budget
-    const budget2 = (this as any)._tileBudgets?.get(client.sessionId) || { neutral: 99, elemental: 99 };
-    const neutralLeft   = ('neutralTilesRemaining'   in player) ? player.neutralTilesRemaining   : budget2.neutral;
-    const elementalLeft = ('elementalTilesRemaining' in player) ? player.elementalTilesRemaining : budget2.elemental;
+      const budget2 = (this as any)._tileBudgets?.get(client.sessionId) || { neutral: 99, elemental: 99 };
+      const neutralLeft   = ('neutralTilesRemaining'   in player) ? player.neutralTilesRemaining   : budget2.neutral;
+      const elementalLeft = ('elementalTilesRemaining' in player) ? player.elementalTilesRemaining : budget2.elemental;
 
-    if (tileType === "neutral" && neutralLeft <= 0) {
-      client.send("error", { code: "NO_TILES", message: "No neutral tiles remaining." });
-      return;
-    }
-    if ((tileType === "fire" || tileType === "water") && elementalLeft <= 0) {
-      client.send("error", { code: "NO_TILES", message: "No elemental tiles remaining." });
-      return;
-    }
+      if (tileType === "neutral" && neutralLeft <= 0) {
+        client.send("error", { code: "NO_TILES", message: "No neutral tiles remaining." });
+        return;
+      }
+      if ((tileType === "fire" || tileType === "water") && elementalLeft <= 0) {
+        client.send("error", { code: "NO_TILES", message: "No elemental tiles remaining." });
+        return;
+      }
 
-    const tile = new Tile();
-    tile.id       = tileId;
-    tile.tileType = tileType;
-    tile.revealed = true;     // All placed tiles are visible for prototype
-    tile.ownedBy  = client.sessionId;
-    this.gs.tiles.set(tileId, tile);
+      const tile = new Tile();
+      tile.id       = tileId;
+      tile.tileType = tileType;
+      tile.revealed = true;
+      tile.ownedBy  = client.sessionId;
+      this.gs.tiles.set(tileId, tile);
 
-    // Decrement whichever storage is available
-    if ('neutralTilesRemaining' in player) {
-      if (tileType === "neutral") player.neutralTilesRemaining--;
-      else player.elementalTilesRemaining--;
-    } else {
-      const b = (this as any)._tileBudgets?.get(client.sessionId);
-      if (b) { if (tileType === "neutral") b.neutral--; else b.elemental--; }
-    }
-    const remainingNeutral   = ('neutralTilesRemaining'   in player) ? player.neutralTilesRemaining   : ((this as any)._tileBudgets?.get(client.sessionId)?.neutral   ?? 0);
-    const remainingElemental = ('elementalTilesRemaining' in player) ? player.elementalTilesRemaining : ((this as any)._tileBudgets?.get(client.sessionId)?.elemental ?? 0);
+      if ('neutralTilesRemaining' in player) {
+        if (tileType === "neutral") player.neutralTilesRemaining--;
+        else player.elementalTilesRemaining--;
+      } else {
+        const b = (this as any)._tileBudgets?.get(client.sessionId);
+        if (b) { if (tileType === "neutral") b.neutral--; else b.elemental--; }
+      }
+      const remainingNeutral   = ('neutralTilesRemaining'   in player) ? player.neutralTilesRemaining   : ((this as any)._tileBudgets?.get(client.sessionId)?.neutral   ?? 0);
+      const remainingElemental = ('elementalTilesRemaining' in player) ? player.elementalTilesRemaining : ((this as any)._tileBudgets?.get(client.sessionId)?.elemental ?? 0);
 
-    addLog(this.gs, `${player.displayName} placed ${tileType} tile at ${tileId}.`);
+      addLog(this.gs, `${player.displayName} placed ${tileType} tile at ${tileId}.`);
 
-    // Broadcast to both clients so both boards update
-    this.broadcast("tile_placed", {
-      tileId,
-      tileType,
-      byPlayer: this.getSeat(client.sessionId),
-      neutralRemaining:   remainingNeutral,
-      elementalRemaining: remainingElemental,
-    });
+      this.broadcast("tile_placed", {
+        tileId,
+        tileType,
+        byPlayer: this.getSeat(client.sessionId),
+        neutralRemaining:   remainingNeutral,
+        elementalRemaining: remainingElemental,
+      });
     } catch(e) { console.error('[GameRoom] handlePlaceTile error:', e); }
   }
 
   private handleEndTilePlacement(client: Client) {
     try {
+      // ── DEBUG: log full state so we can diagnose any future issue ──
+      const allPlayerIds = Array.from(this.gs.players.keys());
+      const allSeats     = allPlayerIds.map(id => `${id}=${this.getSeat(id)}`);
+      console.log(`[GameRoom] handleEndTilePlacement — sender: ${client.sessionId} (${this.getSeat(client.sessionId)}) | players: [${allSeats.join(', ')}] | clients: ${this.clients.length}`);
+
       const player = this.gs.players.get(client.sessionId);
-      if (!player) { console.error('[GameRoom] handleEndTilePlacement: player not found', client.sessionId); return; }
+      if (!player) {
+        console.error('[GameRoom] handleEndTilePlacement: player not found for sessionId:', client.sessionId);
+        return;
+      }
 
       player.tileSetupComplete = true;
       addLog(this.gs, `${player.displayName} finished placing tiles.`);
 
-      const otherPlayerId = this.getOtherPlayerId(client.sessionId);
-      if (!otherPlayerId) { console.error('[GameRoom] handleEndTilePlacement: no otherPlayerId'); return; }
+      // ── Find the other player's sessionId ──
+      // Use seatMap directly so we never rely on gs.players ordering
+      const mySeat    = this.getSeat(client.sessionId);
+      const otherSeat = this.getOtherSeat(mySeat);
+      const otherPlayerId = this.getSessionBySeat(otherSeat);
+
+      console.log(`[GameRoom] handleEndTilePlacement — mySeat: ${mySeat} | otherSeat: ${otherSeat} | otherPlayerId: ${otherPlayerId}`);
+
+      if (!otherPlayerId) {
+        // Second player hasn't joined yet — just wait
+        console.warn('[GameRoom] handleEndTilePlacement: other player not in seatMap yet');
+        client.send("error", { code: "WAITING", message: "Waiting for opponent to join." });
+        return;
+      }
+
       const otherPlayer = this.gs.players.get(otherPlayerId);
 
       if (!otherPlayer?.tileSetupComplete) {
-        // Pass tile placement turn to other player
+        // Pass tile placement turn to the other player
         this.gs.activePlayerId = otherPlayerId;
         addLog(this.gs, `${this.getPlayerName(otherPlayerId)} now places their tiles.`);
+        console.log(`[GameRoom] handleEndTilePlacement — passing turn to ${otherSeat} (${otherPlayerId})`);
         this.broadcastPhaseChange();
         this.broadcastStateUpdate();
       } else {
         // Both done — move to empire placement
         this.gs.currentPhase = String(Phase.SETUP_EMPIRE);
         addLog(this.gs, "Both players placed tiles. Now place your Empires.");
+        console.log('[GameRoom] handleEndTilePlacement — both done, advancing to setup_empire');
         this.broadcastPhaseChange();
         this.broadcastStateUpdate();
       }
@@ -581,10 +609,11 @@ export class GameRoom extends Room<GameRoomState> {
     player.empire.isPlaced  = true;
     player.empireSet        = true;
 
-    tile.revealed  = true;
+    tile.revealed   = true;
     tile.occupiedBy = `empire:${client.sessionId}`;
 
     addLog(this.gs, `${player.displayName} placed Empire at ${tileId}.`);
+    console.log(`[GameRoom] handlePlaceEmpire — ${this.getSeat(client.sessionId)} placed empire at ${tileId}`);
 
     const allPlaced = (Array.from(this.gs.players.values()) as PlayerState[]).every(p => p.empireSet);
     if (allPlaced) {
@@ -595,7 +624,7 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   // ============================================================
-  // STANDBY PHASE — server-driven, no client action needed
+  // STANDBY PHASE — server-driven
   // ============================================================
 
   private startStandbyPhase() {
@@ -605,22 +634,22 @@ export class GameRoom extends Room<GameRoomState> {
 
     recalculateEssence(this.gs, playerId);
 
-    // Reset unit flags
+    // Reset unit flags for active player
     this.gs.units.forEach((unit: UnitInstance) => {
       if (unit.ownerId === playerId) {
-        unit.hasMovedThisTurn    = false;
-        unit.hasAttackedThisTurn = false;
-        unit.speedBonusThisTurn  = 0;
+        unit.hasMovedThisTurn     = false;
+        unit.hasAttackedThisTurn  = false;
+        unit.speedBonusThisTurn   = 0;
         unit.defenseBonusThisTurn = 0;
-        unit.meleeBonusThisTurn  = 0;
+        unit.meleeBonusThisTurn   = 0;
         unit.cannotBeRangedTargeted = false;
         if (unit.hasDevelopmentRest) unit.hasDevelopmentRest = false;
       }
     });
 
     addLog(this.gs, `${player.displayName}'s Standby. Essence: N${player.essence?.neutral ?? 0} F${player.essence?.fire ?? 0} W${player.essence?.water ?? 0}`);
+    console.log(`[GameRoom] startStandbyPhase — activePlayer: ${this.getActiveSeat()}`);
 
-    // Broadcast standby then immediately advance to draw
     this.broadcastPhaseChange();
     this.broadcastStateUpdate();
 
@@ -658,7 +687,6 @@ export class GameRoom extends Room<GameRoomState> {
 
     addLog(this.gs, `${player.displayName} drew from ${deck} deck.`);
 
-    // Send draw_result privately to the drawing player
     const cardDef = CARD_DEFINITIONS[drawn];
     client.send("draw_result", {
       card:     { id: drawn, ...(cardDef ?? { name: drawn, type: "unit" }) },
@@ -666,7 +694,6 @@ export class GameRoom extends Room<GameRoomState> {
       remaining,
     });
 
-    // Advance to main phase
     this.gs.currentPhase = String(Phase.MAIN);
     addLog(this.gs, `${player.displayName}'s Main Phase.`);
     this.broadcastPhaseChange();
@@ -680,8 +707,8 @@ export class GameRoom extends Room<GameRoomState> {
   private handleMoveUnit(client: Client, unitId: string, targetTileId: string) {
     const unit = this.gs.units.get(unitId);
     if (!unit || unit.ownerId !== client.sessionId) return;
-    if (unit.hasDevelopmentRest) { client.send("error", { code: "DEV_REST", message: "Unit is in Development Rest." }); return; }
-    if (unit.hasAttackedThisTurn) { client.send("error", { code: "ALREADY_ACTED", message: "Unit already attacked this turn." }); return; }
+    if (unit.hasDevelopmentRest)   { client.send("error", { code: "DEV_REST",      message: "Unit is in Development Rest." }); return; }
+    if (unit.hasAttackedThisTurn)  { client.send("error", { code: "ALREADY_ACTED", message: "Unit already attacked this turn." }); return; }
 
     const validTiles = getValidMoveTiles(this.gs, unit);
     if (!validTiles.includes(targetTileId)) {
@@ -737,7 +764,6 @@ export class GameRoom extends Room<GameRoomState> {
     this.broadcastStateUpdate();
   }
 
-  // network.js sends "declare_attack" — route to correct handler
   private handleDeclareAttack(client: Client, unitId: string, targetTile: string, mode: "melee" | "ranged") {
     if (mode === "melee") this.handleMeleeAttack(client, unitId, targetTile);
     else                  this.handleRangedAttack(client, unitId, targetTile);
@@ -813,11 +839,11 @@ export class GameRoom extends Room<GameRoomState> {
     player.hand.splice(handIdx, 1);
 
     const unit = new UnitInstance();
-    unit.instanceId        = this.nextId();
-    unit.cardId            = cardId;
-    unit.ownerId           = client.sessionId;
-    unit.tileId            = spawnTileId;
-    unit.currentHp         = cardDef.hp;
+    unit.instanceId    = this.nextId();
+    unit.cardId        = cardId;
+    unit.ownerId       = client.sessionId;
+    unit.tileId        = spawnTileId;
+    unit.currentHp     = cardDef.hp;
     const noRestRounds = (typeof FIRST_PLAYER_NO_DEV_REST_ROUNDS !== 'undefined') ? FIRST_PLAYER_NO_DEV_REST_ROUNDS : 2;
     unit.hasDevelopmentRest = this.gs.roundNumber > noRestRounds;
 
@@ -860,11 +886,10 @@ export class GameRoom extends Room<GameRoomState> {
       blitzSpeed: "instant",
     });
 
-    // Open reaction window for opponent
     const otherId = this.getOtherPlayerId(client.sessionId);
-    this.gs.pendingBlitzCardId    = cardId;
-    this.gs.reactionFromPlayerId  = otherId;
-    this.gs.awaitingReaction      = true;
+    this.gs.pendingBlitzCardId   = cardId;
+    this.gs.reactionFromPlayerId = otherId;
+    this.gs.awaitingReaction     = true;
 
     this.applyBlitzEffect(cardDef, targetId, client.sessionId);
     this.broadcastStateUpdate();
@@ -928,7 +953,6 @@ export class GameRoom extends Room<GameRoomState> {
     const cardDef = CARD_DEFINITIONS[cardId] as StructureCardDef;
     if (!cardDef || cardDef.type !== CardType.STRUCTURE) return;
 
-    // Structures come from extraDeck
     const extraIdx = player.extraDeck.indexOf(cardId);
     if (extraIdx === -1) { client.send("error", { code: "NOT_IN_DECK", message: "Structure not in extra deck." }); return; }
 
@@ -943,12 +967,12 @@ export class GameRoom extends Room<GameRoomState> {
     spendEssence(player.essence, cardDef.essenceCost, cardDef.element);
     player.extraDeck.splice(extraIdx, 1);
 
-    const structure        = new StructureInstance();
-    structure.instanceId   = this.nextId();
-    structure.cardId       = cardId;
-    structure.ownerId      = client.sessionId;
-    structure.tileId       = tileId;
-    structure.currentHp    = (typeof STRUCTURE_MAX_HP !== 'undefined') ? STRUCTURE_MAX_HP : 10;
+    const structure      = new StructureInstance();
+    structure.instanceId = this.nextId();
+    structure.cardId     = cardId;
+    structure.ownerId    = client.sessionId;
+    structure.tileId     = tileId;
+    structure.currentHp  = (typeof STRUCTURE_MAX_HP !== 'undefined') ? STRUCTURE_MAX_HP : 10;
 
     this.gs.structures.set(structure.instanceId, structure);
     tile.occupiedBy = structure.instanceId;
@@ -966,14 +990,14 @@ export class GameRoom extends Room<GameRoomState> {
     const player = this.gs.players.get(client.sessionId)!;
     const tile   = this.gs.tiles.get(tileId);
 
-    if (!tile)              { client.send("error", { code: "NO_TILE",  message: "Tile not found." }); return; }
+    if (!tile)                       { client.send("error", { code: "NO_TILE",    message: "Tile not found." }); return; }
     if (tile.tileType === "neutral") { client.send("error", { code: "WRONG_TILE", message: "Builders must be on elemental tiles." }); return; }
-    if (tile.occupiedBy)    { client.send("error", { code: "OCCUPIED", message: "Tile is occupied." }); return; }
+    if (tile.occupiedBy)             { client.send("error", { code: "OCCUPIED",   message: "Tile is occupied." }); return; }
 
-    const builder         = new BuilderInstance();
-    builder.instanceId    = this.nextId();
-    builder.ownerId       = client.sessionId;
-    builder.tileId        = tileId;
+    const builder      = new BuilderInstance();
+    builder.instanceId = this.nextId();
+    builder.ownerId    = client.sessionId;
+    builder.tileId     = tileId;
 
     this.gs.builders.set(builder.instanceId, builder);
     tile.occupiedBy = builder.instanceId;
@@ -1021,7 +1045,6 @@ export class GameRoom extends Room<GameRoomState> {
     this.gs.activePlayerId = this.getOtherPlayerId(client.sessionId);
     addLog(this.gs, `${this.getPlayerName(this.gs.activePlayerId)}'s turn begins.`);
 
-    // Short pause then start next standby
     this.clock.setTimeout(() => this.startStandbyPhase(), 800);
   }
 
@@ -1101,10 +1124,10 @@ export class GameRoom extends Room<GameRoomState> {
   }
 
   private getNeighborIds(tileId: string): string[] {
-    const row    = parseInt(tileId.split("c")[0].replace("r", ""));
-    const col    = parseInt(tileId.split("c")[1]);
-    const isOdd  = row % 2 !== 0;
-    const offs   = isOdd
+    const row   = parseInt(tileId.split("c")[0].replace("r", ""));
+    const col   = parseInt(tileId.split("c")[1]);
+    const isOdd = row % 2 !== 0;
+    const offs  = isOdd
       ? [[-1,0],[-1,1],[0,-1],[0,1],[1,0],[1,1]]
       : [[-1,-1],[-1,0],[0,-1],[0,1],[1,-1],[1,0]];
     return offs.map(([dr, dc]) => `r${row+dr!}c${col+dc!}`);
@@ -1138,10 +1161,8 @@ export class GameRoom extends Room<GameRoomState> {
   private killUnit(instanceId: string, killerPlayerId: string) {
     const unit = this.gs.units.get(instanceId);
     if (!unit) return;
-
     const tile = this.gs.tiles.get(unit.tileId);
     if (tile && tile.occupiedBy === instanceId) tile.occupiedBy = "";
-
     this.gs.units.delete(instanceId);
     addLog(this.gs, `Unit ${instanceId} destroyed by ${this.getPlayerName(killerPlayerId)}.`);
   }
