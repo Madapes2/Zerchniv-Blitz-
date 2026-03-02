@@ -165,40 +165,25 @@ document.addEventListener('DOMContentLoaded', function () {
     };
 
 // ── 9. PHASE ─────────────────────────────────────────────
-// network.js calls M._setPhase(phase, turn, isMyTurn)
-const _origSetPhase = M._setPhase;
-M._setPhase = function (phase, turn, isMyTurn) {
-  if (_origSetPhase) _origSetPhase.call(M, phase, turn, isMyTurn);
+    // network.js calls M._setPhase(phase, turn, isMyTurn)
+    const _origSetPhase = M._setPhase;
+    M._setPhase = function (phase, turn, isMyTurn) {
+      if (_origSetPhase) _origSetPhase.call(M, phase, turn, isMyTurn);
 
-  // Update phase indicator pills
-  ['standby', 'draw', 'main', 'end'].forEach(p => {
-    const el = document.getElementById('m-ph-' + p);
-    if (el) el.classList.toggle('on', p === phase);
-  });
+      // Update phase indicator pills
+      ['standby', 'draw', 'main', 'end'].forEach(p => {
+        const el = document.getElementById('m-ph-' + p);
+        if (el) el.classList.toggle('on', p === phase);
+      });
 
-  // Update turn counter
-  const turnEl = document.getElementById('m-turn');
-  if (turnEl && turn) turnEl.textContent = turn;
+      // Update turn counter
+      const turnEl = document.getElementById('m-turn');
+      if (turnEl && turn) turnEl.textContent = turn;
 
-  // Tell Phaser whose turn it is
-  if (window.HexScene) {
-    window.HexScene.isMyTurn = !!isMyTurn;
-  }
-
-  // Forward to ZB server client with correct seat label
-  if (window.ZB && window.ZB.onPhaseChange) {
-    const activeSeat = isMyTurn ? window._zbMySeat
-                     : (window._zbMySeat === 'p1' ? 'p2' : 'p1');
-    console.log('[BRIDGE] M._setPhase forwarding to ZB — phase:', phase, '| activeSeat:', activeSeat, '| isMyTurn:', isMyTurn);
-    window.ZB.onPhaseChange(phase, activeSeat);
-  }
-};
-```
-
-That's the only change. Deploy and test — after P1 clicks Done, P2's console should now show:
-```
-[BRIDGE] M._setPhase forwarding to ZB — phase: setup_tiles | activeSeat: p2 | isMyTurn: false
-[SERVER CLIENT] Phase: setup_tiles | Active: p2 | Me: p2 | My turn: true
+      // Tell Phaser whose turn it is
+      if (window.HexScene) {
+        window.HexScene.isMyTurn = !!isMyTurn;
+      }
 
       // During Draw phase, highlight deck buttons to prompt drawing
       _updateDrawPhaseUI(phase, isMyTurn);
@@ -206,6 +191,14 @@ That's the only change. Deploy and test — after P1 clicks Done, P2's console s
       // During setup phases, render the tile/empire placement bar
       if (phase === 'setup_tiles' || phase === 'setup_empire') {
         if (window.ZB && window.ZB.renderHand) window.ZB.renderHand();
+      }
+
+      // Forward to ZB server client with correct seat label
+      if (window.ZB && window.ZB.onPhaseChange) {
+        const activeSeat = isMyTurn ? window._zbMySeat
+                         : (window._zbMySeat === 'p1' ? 'p2' : 'p1');
+        console.log('[BRIDGE] M._setPhase → ZB phase:', phase, '| activeSeat:', activeSeat);
+        window.ZB.onPhaseChange(phase, activeSeat);
       }
     };
 
