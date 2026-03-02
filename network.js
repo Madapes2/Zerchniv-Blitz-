@@ -14,63 +14,15 @@
  *  • Drives all phase transitions from server state
  *  • Exposes a single global: window.NET
  *
- *  HOW TO ADD IT TO index.html
- *  ────────────────────────────
- *  1. Copy this file alongside index.html
- *  2. In index.html <head>, add BEFORE the closing </head>:
- *       <script src="https://unpkg.com/colyseus.js@^0.15.0/dist/colyseus.js"></script>
- *       <script src="network.js"></script>
- *  3. In startBat(), replace the existing body with:
- *       NET.queueMatchmaking();
- *  4. In startAI(), if you want a real server match instead of AI:
- *       NET.queueMatchmaking();
- *     Otherwise keep startAI() pointing to launchMatch() for local AI fallback.
- *  5. Set NET.SERVER_URL below to your Colyseus Cloud URL.
- *  6. That's it — every game action now routes through the server.
+ *  PHASE CONTRACT
+ *  ──────────────
+ *  Server sends phase strings as lowercase:
+ *    'setup_tiles', 'setup_empire', 'standby', 'draw', 'main', 'end'
+ *  activePlayer is always a seat label: 'p1' or 'p2'
  *
- *  COLYSEUS SERVER CONTRACT  (what your server must implement)
- *  ─────────────────────────
- *  Room name   : "zerchniv_room"
- *  Join options: { deckId: string, userId: string }
- *
- *  Server → Client messages (room.onMessage):
- *    "game_start"      { yourSeat: "p1"|"p2", state: GameState }
- *    "state_update"    { state: GameState }           — full state snapshot
- *    "valid_moves"     { unitId: string, tiles: number[] }
- *    "valid_targets"   { unitId: string, tiles: number[], mode: "melee"|"ranged" }
- *    "combat_result"   { attackerId, targetId, roll, def, hit, damage, died, essenceGained }
- *    "blitz_played"    { cardId, playerId, targetId?, blitzSpeed, stormId? }
- *    "storm_update"    { stormId, stack: BlitzEntry[], resolved: boolean }
- *    "fog_reveal"      { tiles: number[] }
- *    "draw_result"     { card: CardData, deckType: "unit"|"blitz"|"extra", remaining: number }
- *    "phase_change"    { phase: "standby"|"draw"|"main"|"end", turn: number, activePlayer: "p1"|"p2" }
- *    "essence_update"  { n: number, f: number, w: number }
- *    "capture_update"  { structureTile: number, capturedBy: "p1"|"p2"|null, progress: number }
- *    "siege_update"    { empireTile: number, siegeBy: "p1"|"p2"|null, unitCount: number }
- *    "chat_message"    { sender: string, text: string }
- *    "player_left"     { seat: "p1"|"p2" }
- *    "error"           { code: string, message: string }
- *    "game_over"       { winner: "p1"|"p2", reason: string }
- *
- *  Client → Server messages (room.send):
- *    "move_unit"       { unitId, toTile }
- *    "request_moves"   { unitId }
- *    "declare_attack"  { unitId, targetTile, mode: "melee"|"ranged" }
- *    "request_targets" { unitId, mode }
- *    "play_blitz"      { cardId, targetId?, targetTile? }
- *    "play_reaction"   { cardId, stormId, reactingToId }
- *    "deploy_unit"     { cardId, tileIdx }
- *    "deploy_structure"{ cardId, tileIdx }
- *    "draw_card"       { deckType }
- *    "end_turn"        {}
- *    "send_chat"       { text }
- *    "challenge_player"{ targetUsername, deckId }
- *    "accept_challenge"{ challengeId, deckId }
- *    "decline_challenge"{ challengeId }
- *    "ability_use"     { unitId, abilityIndex, targetId?, targetTile?, essenceCost }
- *    "capture_start"   { unitId, structureTile }
- *    "siege_declare"   { unitIds: string[] }
- *    "concede"         {}
+ *  _handlePhaseChange is the SINGLE entry point for all phase updates.
+ *  It calls ZB.onPhaseChange FIRST, then M._setPhase.
+ *  bridge.js onStateChange NEVER updates phase — tiles/units only.
  * ═══════════════════════════════════════════════════════════════════
  */
 
@@ -78,10 +30,10 @@
   'use strict';
 
   // ────────────────────────────────────────────────────────────────
-  //  CONFIG — update SERVER_URL to your Colyseus Cloud instance
+  //  CONFIG
   // ────────────────────────────────────────────────────────────────
   const CONFIG = {
-    SERVER_URL: 'https://us-mia-55cdd0b8.colyseus.cloud',  // ← CHANGE THIS
+    SERVER_URL: 'https://us-mia-55cdd0b8.colyseus.cloud',
     ROOM_NAME:  'game_room',
     RECONNECT_ATTEMPTS: 3,
     MATCHMAKING_TIMEOUT_MS: 30000,
@@ -90,9 +42,9 @@
   // ────────────────────────────────────────────────────────────────
   //  Internal state
   // ────────────────────────────────────────────────────────────────
-  let _client       = null;   // Colyseus.Client
-  let _room         = null;   // Colyseus.Room
-  let _mySeat       = null;   // "p1" | "p2"
+  let _client       = null;
+  let _room         = null;
+  let _mySeat       = null;
   let _myUserId     = null;
   let _myDeckId     = null;
   let _matchTimer   = null;
@@ -101,10 +53,9 @@
   let _stormActive  = false;
 
   // ────────────────────────────────────────────────────────────────
-  //  Helpers — bridge to the M match engine in index.html
+  //  Helpers
   // ────────────────────────────────────────────────────────────────
   function log(type, msg) {
-    // type: 's' success/system, 'a' attack, 'd' damage/opponent, 'e' error
     if (typeof M !== 'undefined' && M._log) {
       M._log(type, msg);
     } else {
@@ -135,18 +86,10 @@
     if (el) el.textContent = text;
   }
 
-  function isMyTurn(state) {
-    return state && state.activePlayer === _mySeat;
-  }
-
   // ────────────────────────────────────────────────────────────────
   //  Connection lifecycle
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Create the Colyseus client. Call once on page load.
-   * We defer actual room joining until the player hits Battle!
-   */
   function init(options = {}) {
     if (!global.Colyseus) {
       console.error('[NET] Colyseus.js SDK not loaded. Add the script tag before network.js.');
@@ -171,13 +114,9 @@
   }
 
   // ────────────────────────────────────────────────────────────────
-  //  MATCHMAKING  (Battle! button flow)
+  //  MATCHMAKING
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Called when the player clicks Battle!
-   * Opens the matchmaking modal then attempts to join/create a room.
-   */
   async function queueMatchmaking() {
     const deckSel = document.getElementById('dsel');
     if (!deckSel || !deckSel.value) {
@@ -186,11 +125,9 @@
     }
     _myDeckId = deckSel.value;
 
-    // Show matchmaking overlay
     if (typeof op === 'function') op('mmod');
     setMatchmakingStatus('Searching for an opponent…');
 
-    // Start timeout — if no match found, show AI fallback option
     _matchTimer = setTimeout(() => {
       setMatchmakingStatus('No opponents found. You can fight an AI instead.');
       _showAIFallback();
@@ -205,7 +142,6 @@
   }
 
   function _showAIFallback() {
-    // Reveal the AI option button in the matchmaking modal
     const aiBtn = document.querySelector('.mbtn.gl');
     if (aiBtn) {
       aiBtn.style.display = 'block';
@@ -214,52 +150,34 @@
     }
   }
 
-  /**
-   * Cancel matchmaking — clears the timer and leaves the room if joined.
-   */
   function cancelMatchmaking() {
     clearTimeout(_matchTimer);
-    if (_room) {
-      _room.leave();
-      _room = null;
-    }
+    if (_room) { _room.leave(); _room = null; }
     if (typeof cl === 'function') cl('mmod');
   }
 
   // ────────────────────────────────────────────────────────────────
-  //  CHALLENGE  (Find a User flow)
+  //  CHALLENGE
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Send a direct challenge to another player by username.
-   * The server should handle routing the invite to that player.
-   */
   async function challengePlayer(targetUsername) {
     const deckSel = document.getElementById('dsel');
     if (!deckSel || !deckSel.value) { if (typeof flashSel === 'function') flashSel(); return; }
     _myDeckId = deckSel.value;
 
     if (!_room) {
-      // Connect to a lobby room first so we can receive the challenge response
       try {
         await _joinOrCreateRoom({ deckId: _myDeckId, userId: _myUserId, challengeMode: true });
-      } catch (err) {
-        _handleConnectionError(err);
-        return;
-      }
+      } catch (err) { _handleConnectionError(err); return; }
     }
 
     _room.send('challenge_player', { targetUsername, deckId: _myDeckId });
 
-    // Update challenge modal
     const ctgt = document.getElementById('ctgt');
     if (ctgt) ctgt.textContent = targetUsername;
     if (typeof op === 'function') op('cmod');
   }
 
-  /**
-   * Accept an incoming challenge.
-   */
   function acceptChallenge() {
     if (!_room || !_pendingChallengeId) return;
     const deckSel = document.getElementById('dsel');
@@ -268,9 +186,6 @@
     if (typeof cl === 'function') cl('cmod');
   }
 
-  /**
-   * Decline an incoming challenge.
-   */
   function declineChallenge() {
     if (!_room || !_pendingChallengeId) return;
     _room.send('decline_challenge', { challengeId: _pendingChallengeId });
@@ -279,7 +194,7 @@
   }
 
   // ────────────────────────────────────────────────────────────────
-  //  ROOM SETUP  (internal)
+  //  ROOM SETUP
   // ────────────────────────────────────────────────────────────────
 
   async function _joinOrCreateRoom(options) {
@@ -291,7 +206,7 @@
     const joinOptions = {
       ...options,
       displayName: options.userId || 'Player',
-      unitDeck: [],
+      unitDeck:  [],
       blitzDeck: [],
       extraDeck: [],
     };
@@ -309,13 +224,10 @@
 
     _room.onMessage('game_start', (data) => {
       clearTimeout(_matchTimer);
-      _mySeat = data.yourSeat;   // "p1" or "p2"
-      console.log('[NET] game_start — I am seat:', _mySeat);
+      _mySeat = data.yourSeat;
+      console.log('[NET] game_start — I am seat:', _mySeat, '| activePlayer:', data.state?.activePlayer);
 
-      // Close matchmaking modal
       if (typeof cl === 'function') cl('mmod');
-
-      // Launch the match screen with server-provided initial state
       _launchMatchFromServer(data.state);
     });
 
@@ -324,15 +236,12 @@
     });
 
     _room.onMessage('valid_moves', (data) => {
-      // data: { unitId, tiles }
-      // Tell M to highlight those tiles as move targets
       if (typeof M !== 'undefined' && M._setValidMoves) {
         M._setValidMoves(data.unitId, data.tiles);
       }
     });
 
     _room.onMessage('valid_targets', (data) => {
-      // data: { unitId, tiles, mode }
       if (typeof M !== 'undefined' && M._setValidTargets) {
         M._setValidTargets(data.unitId, data.tiles, data.mode);
       }
@@ -351,7 +260,6 @@
     });
 
     _room.onMessage('fog_reveal', (data) => {
-      // data: { tiles: number[] }
       if (typeof M !== 'undefined' && M._revealTiles) {
         M._revealTiles(data.tiles);
       }
@@ -366,11 +274,9 @@
     });
 
     _room.onMessage('essence_update', (data) => {
-      // data: { n, f, w }
       if (typeof M !== 'undefined' && M._setEssence) {
         M._setEssence(data);
       } else {
-        // Fallback: update HUD directly
         const en = document.getElementById('m-ess-n');
         const ef = document.getElementById('m-ess-f');
         const ew = document.getElementById('m-ess-w');
@@ -381,7 +287,6 @@
     });
 
     _room.onMessage('capture_update', (data) => {
-      // data: { structureTile, capturedBy, progress }
       const prog = data.progress >= 1
         ? `${data.capturedBy === _mySeat ? 'You' : 'Opponent'} captured a Structure!`
         : `Structure capture: ${Math.round(data.progress * 100)}% (${data.capturedBy === _mySeat ? 'You' : 'Opponent'})`;
@@ -390,7 +295,6 @@
     });
 
     _room.onMessage('siege_update', (data) => {
-      // data: { empireTile, siegeBy, unitCount }
       if (data.siegeBy) {
         const who = data.siegeBy === _mySeat ? 'You have' : 'Opponent has';
         const msg = `⚔ SIEGE! ${who} ${data.unitCount}/5 units surrounding the Empire!`;
@@ -404,13 +308,11 @@
     });
 
     _room.onMessage('challenge_incoming', (data) => {
-      // data: { challengeId, fromUsername, deckName }
       _pendingChallengeId = data.challengeId;
       _showIncomingChallenge(data);
     });
 
     _room.onMessage('challenge_accepted', (data) => {
-      // Our challenge was accepted — game_start will follow
       if (typeof cl === 'function') cl('cmod');
       toast(`Challenge accepted by ${data.acceptedBy}! Starting match…`);
     });
@@ -435,7 +337,6 @@
       log('s', `${who} disconnected.`);
       toast(`${who} left the game.`);
       if (data.seat !== _mySeat) {
-        // Opponent left — we win by forfeit
         setTimeout(() => {
           if (typeof M !== 'undefined' && M.winGame) M.winGame('forfeit');
         }, 1500);
@@ -446,8 +347,7 @@
 
     _room.onLeave((code) => {
       console.log('[NET] Left room. Code:', code);
-      if (code === 1000) return; // clean leave, do nothing
-      // Unexpected disconnect — attempt reconnect
+      if (code === 1000) return;
       if (_reconnects < CONFIG.RECONNECT_ATTEMPTS) {
         _reconnects++;
         toast(`Connection lost. Reconnecting… (${_reconnects}/${CONFIG.RECONNECT_ATTEMPTS})`);
@@ -478,8 +378,6 @@
     console.error('[NET] Could not connect to server:', err);
     clearTimeout(_matchTimer);
     if (typeof cl === 'function') cl('mmod');
-
-    // Let the player fight AI instead
     toast('Could not connect to server — launching AI match instead.');
     if (typeof launchMatch === 'function') {
       setTimeout(launchMatch, 600);
@@ -491,27 +389,23 @@
   // ────────────────────────────────────────────────────────────────
 
   function _launchMatchFromServer(serverState) {
-    // Show the match screen
     const mscr = document.getElementById('mscr');
     if (mscr) mscr.classList.add('on');
 
-    // Initialise M in "network mode" — skips AI simulation
     if (typeof M !== 'undefined' && M.initFromServer) {
       M.initFromServer(serverState, _mySeat);
     } else if (typeof M !== 'undefined' && M.init) {
-      // Fallback: use existing init, then immediately overwrite state
       M.init();
       _applyStateUpdate(serverState);
     }
 
     const opponent = serverState.players
-      ? Object.values(serverState.players).find(p => p.seat !== _mySeat)
+      ? Object.values(serverState.players).find(p => p && p.seat !== _mySeat)
       : null;
 
     log('s', `═══ MATCH BEGINS — You are ${_mySeat === 'p1' ? 'Player 1' : 'Player 2'} ═══`);
     if (opponent) log('s', `Opponent: ${opponent.username || 'Unknown'}`);
 
-    // Update opponent name display if the HUD has a slot for it
     const oppNameEl = document.getElementById('m-opp-name');
     if (oppNameEl && opponent) oppNameEl.textContent = opponent.username || 'Opponent';
   }
@@ -520,80 +414,57 @@
   //  STATE APPLICATION  (server → client)
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Apply a full authoritative state snapshot from the server.
-   * Maps server field names to the M engine's internal GS object.
-   *
-   * Expected serverState shape:
-   * {
-   *   turn: number,
-   *   phase: "standby"|"draw"|"main"|"end",
-   *   activePlayer: "p1"|"p2",
-   *   players: {
-   *     p1: { username, hp, essence:{n,f,w}, unitDeckCount, blitzDeckCount, extraDeckCount, discardCount, hand: CardData[] },
-   *     p2: { ... }
-   *   },
-   *   units: UnitInstance[],       // all units on board (both sides)
-   *   structures: StructureInstance[],
-   *   tiles: TileState[],          // tile types + revealed flags
-   *   empires: { p1: {tileIdx, hp}, p2: {tileIdx, hp} }
-   * }
-   */
   function _applyStateUpdate(state) {
     if (!state || typeof M === 'undefined') return;
 
     const me  = state.players?.[_mySeat];
     const opp = state.players?.[ _mySeat === 'p1' ? 'p2' : 'p1' ];
 
-    // ── Essence ──
     if (me?.essence && M._setEssence) {
       M._setEssence(me.essence);
     }
 
-    // ── Empire HP ──
     if (state.empires) {
       const myEmpire  = state.empires[_mySeat];
       const oppEmpire = state.empires[ _mySeat === 'p1' ? 'p2' : 'p1' ];
       if (M._setEmpireHP) {
-        M._setEmpireHP('player', myEmpire?.hp ?? 20);
+        M._setEmpireHP('player',   myEmpire?.hp  ?? 20);
         M._setEmpireHP('opponent', oppEmpire?.hp ?? 20);
       }
     }
 
-    // ── Units ──
     if (state.units && M._setUnits) {
       const myUnits  = state.units.filter(u => u.owner === _mySeat);
       const oppUnits = state.units.filter(u => u.owner !== _mySeat);
       M._setUnits(myUnits, oppUnits);
     }
 
-    // ── Tiles / fog ──
     if (state.tiles && M._applyTileState) {
       M._applyTileState(state.tiles);
     }
 
-    // ── Deck counts ──
     if (me && M._setDeckCounts) {
       M._setDeckCounts({
-        unitDeck:   me.unitDeckCount   ?? 0,
-        blitzDeck:  me.blitzDeckCount  ?? 0,
-        extraDeck:  me.extraDeckCount  ?? 0,
-        discard:    me.discardCount    ?? 0,
+        unitDeck:  me.unitDeckCount  ?? 0,
+        blitzDeck: me.blitzDeckCount ?? 0,
+        extraDeck: me.extraDeckCount ?? 0,
+        discard:   me.discardCount   ?? 0,
       });
     }
 
-    // ── Hand ──
     if (me?.hand && M._setHand) {
       M._setHand(me.hand);
     }
 
-    // ── Phase ──
-    if (state.phase && M._setPhase) {
-      const isActive = state.activePlayer === _mySeat;
-      M._setPhase(state.phase, state.turn, isActive);
+    // Phase from state_update — route through _handlePhaseChange
+    if (state.phase) {
+      _handlePhaseChange({
+        phase:        state.phase,
+        turn:         state.turn,
+        activePlayer: state.activePlayer,
+      });
     }
 
-    // Redraw board
     if (M.redraw) M.redraw();
   }
 
@@ -602,15 +473,6 @@
   // ────────────────────────────────────────────────────────────────
 
   function _handleCombatResult(data) {
-    /*
-     * data: {
-     *   attackerId,  targetId,
-     *   roll,        def,
-     *   hit: bool,   damage: number,
-     *   died: bool,  essenceGained: number,
-     *   isEmpireTarget: bool
-     * }
-     */
     const rollMsg = `d10 roll: ${data.roll} vs DEF ${data.def}`;
 
     if (data.hit) {
@@ -630,33 +492,22 @@
       toast(`✗ Miss! Roll ${data.roll} didn't beat DEF ${data.def}`);
     }
 
-    // Visual flash on the board canvas
     if (typeof M !== 'undefined' && M._flashCombat) {
       M._flashCombat(data.attackerId, data.targetId, data.hit);
     }
   }
 
   function _handleBlitzPlayed(data) {
-    /*
-     * data: { cardId, playedBy, targetId, blitzSpeed, stormId }
-     * blitzSpeed: "instant" | "slow" | "reaction"
-     */
     const who = data.playedBy === _mySeat ? 'You played' : 'Opponent played';
     log('a', `⚡ ${who} Blitz card: ${data.cardId} [${data.blitzSpeed}]`);
     toast(`⚡ ${who} Blitz: ${data.cardId}`);
-
     if (data.blitzSpeed === 'reaction') {
       toast(`🌀 Reaction! ${who} countered a Blitz card.`);
     }
   }
 
   function _handleStormUpdate(data) {
-    /*
-     * data: { stormId, stack: [{cardId, playedBy, blitzSpeed}], resolved: bool }
-     * A "Storm" happens when Blitz cards chain — we show a queue UI.
-     */
     _stormActive = !data.resolved;
-
     if (data.resolved) {
       log('s', '🌀 Storm resolved.');
       toast('Storm resolved!');
@@ -668,9 +519,6 @@
   }
 
   function _handleDrawResult(data) {
-    /*
-     * data: { card: CardData, deckType, remaining }
-     */
     log('s', `Drew: ${data.card.name} from ${data.deckType} deck. (${data.remaining} remaining)`);
     toast(`Drew ${data.card.name}!`);
     if (typeof M !== 'undefined' && M._addCardToHand) {
@@ -678,39 +526,50 @@
     }
   }
 
-function _handlePhaseChange(data) {
-  console.log('[NET] _handlePhaseChange received:', JSON.stringify(data));
-  /*
-   * data: { phase, turn, activePlayer }
-   */
-  const isMyTurnNow = data.activePlayer === _mySeat;
+  // ── PHASE CHANGE — single entry point for all phase updates ──
+  // phase is always lowercase: 'setup_tiles', 'setup_empire',
+  //   'standby', 'draw', 'main', 'end'
+  // activePlayer is always a seat label: 'p1' or 'p2'
+  //
+  // CALL ORDER:
+  //   1. ZB.onPhaseChange — updates CS.currentPhase, CS.activePlayerId, renders hand
+  //   2. M._setPhase     — updates phase pills, Phaser isMyTurn flag
+  //
+  // bridge.js onStateChange NEVER calls this — tiles/units only.
+  function _handlePhaseChange(data) {
+    console.log('[NET] _handlePhaseChange received:', JSON.stringify(data));
 
-  // Forward to ZB
-  if (window.ZB && window.ZB.onPhaseChange) {
-    window.ZB.onPhaseChange(data.phase, data.activePlayer);
+    const isMyTurnNow = data.activePlayer === _mySeat;
+
+    // ── 1. ZB first — so CS.currentPhase is correct before any render ──
+    if (window.ZB && window.ZB.onPhaseChange) {
+      window.ZB.onPhaseChange(data.phase, data.activePlayer);
+    }
+
+    // ── 2. M._setPhase — updates DOM pills and Phaser flag ──
+    if (typeof M !== 'undefined' && M._setPhase) {
+      M._setPhase(data.phase, data.turn, isMyTurnNow);
+    }
+
+    const phaseLabel = {
+      setup_tiles:  'SETUP TILES',
+      setup_empire: 'SETUP EMPIRE',
+      standby:      'STANDBY',
+      draw:         'DRAW',
+      main:         'MAIN',
+      end:          'END',
+    }[data.phase] || (data.phase || '').toUpperCase();
+
+    if (isMyTurnNow) {
+      log('s', `═══ YOUR TURN — Turn ${data.turn} · ${phaseLabel} Phase ═══`);
+      toast(`Turn ${data.turn} — ${phaseLabel} — Your turn!`);
+    } else {
+      log('d', `Opponent's turn — ${phaseLabel} Phase`);
+      toast(`Turn ${data.turn} — ${phaseLabel} — Waiting for opponent…`);
+    }
   }
-
-  if (typeof M !== 'undefined' && M._setPhase) {
-    M._setPhase(data.phase, data.turn, isMyTurnNow);
-  }
-
-  const phaseLabel = {
-    standby: 'STANDBY', draw: 'DRAW', main: 'MAIN', end: 'END'
-  }[data.phase] || data.phase.toUpperCase();
-
-  if (isMyTurnNow) {
-    log('s', `═══ YOUR TURN — Turn ${data.turn} · ${phaseLabel} Phase ═══`);
-    toast(`Turn ${data.turn} — ${phaseLabel} Phase — Your turn!`);
-  } else {
-    log('d', `Opponent's turn — ${phaseLabel} Phase`);
-    toast(`Turn ${data.turn} — ${phaseLabel} Phase — Waiting for opponent…`);
-  }
-}
 
   function _handleGameOver(data) {
-    /*
-     * data: { winner: "p1"|"p2", reason: "empire_destroyed"|"siege"|"forfeit"|"timeout" }
-     */
     const iWon = data.winner === _mySeat;
     const reasonMap = {
       empire_destroyed: 'Empire destroyed',
@@ -728,12 +587,11 @@ function _handlePhaseChange(data) {
       if (typeof M !== 'undefined' && M.loseGame) M.loseGame(data.reason);
     }
 
-    // Disconnect cleanly after a short delay
     setTimeout(() => { if (_room) _room.leave(); }, 3000);
   }
 
   // ────────────────────────────────────────────────────────────────
-  //  STORM UI  (Blitz chain queue display)
+  //  STORM UI
   // ────────────────────────────────────────────────────────────────
 
   function _showStormUI(stack) {
@@ -769,15 +627,13 @@ function _handlePhaseChange(data) {
   }
 
   // ────────────────────────────────────────────────────────────────
-  //  CHALLENGE UI  (incoming challenge notification)
+  //  CHALLENGE UI
   // ────────────────────────────────────────────────────────────────
 
   function _showIncomingChallenge(data) {
-    // Populate the existing challenge modal for the receiver
     const ctgt = document.getElementById('ctgt');
     if (ctgt) ctgt.textContent = data.fromUsername;
 
-    // Swap the modal buttons to Accept / Decline instead of Confirm / Cancel
     const cmod = document.getElementById('cmod');
     if (cmod) {
       const body = cmod.querySelector('.cmb') || cmod;
@@ -818,124 +674,77 @@ function _handlePhaseChange(data) {
 
   // ────────────────────────────────────────────────────────────────
   //  PLAYER ACTIONS  (client → server)
-  //  All functions below are the replacements for the local M engine
-  //  functions. Instead of modifying local state, they send a message
-  //  to the server. The server validates, applies, and broadcasts back.
   // ────────────────────────────────────────────────────────────────
 
-  /**
-   * Request valid move tiles for a unit.
-   * Server responds with "valid_moves" message.
-   */
   function requestMoves(unitId) {
     if (!_assertConnected()) return;
     _room.send('request_moves', { unitId });
   }
 
-  /**
-   * Move a unit to a tile.
-   */
   function moveUnit(unitId, toTile) {
     if (!_assertConnected()) return;
     _room.send('move_unit', { unitId, toTile });
     log('s', `Moving ${unitId} → tile ${toTile}…`);
   }
 
-  /**
-   * Request valid attack targets for a unit.
-   * Server responds with "valid_targets" message.
-   */
   function requestTargets(unitId, mode) {
     if (!_assertConnected()) return;
     _room.send('request_targets', { unitId, mode });
   }
 
-  /**
-   * Declare an attack.
-   * Server resolves the d10 roll and responds with "combat_result" then "state_update".
-   */
   function declareAttack(unitId, targetTile, mode) {
     if (!_assertConnected()) return;
     _room.send('declare_attack', { unitId, targetTile, mode });
     log('a', `${unitId} declares ${mode} attack on tile ${targetTile}…`);
   }
 
-  /**
-   * Play a Blitz card from hand.
-   */
   function playBlitz(cardId, options = {}) {
     if (!_assertConnected()) return;
     _room.send('play_blitz', { cardId, ...options });
     log('a', `Playing Blitz card: ${cardId}`);
   }
 
-  /**
-   * Play a Reaction Blitz card during a Storm.
-   */
   function playReaction(cardId, stormId, reactingToId) {
     if (!_assertConnected()) return;
     _room.send('play_reaction', { cardId, stormId, reactingToId });
     log('a', `Reaction! Playing ${cardId} against ${reactingToId}`);
   }
 
-  /**
-   * Deploy a unit from hand onto the board.
-   */
   function deployUnit(cardId, tileIdx) {
     if (!_assertConnected()) return;
     _room.send('deploy_unit', { cardId, tileIdx });
     log('s', `Deploying ${cardId} to tile ${tileIdx}…`);
   }
 
-  /**
-   * Deploy a structure from the Extra deck onto the board.
-   */
   function deployStructure(cardId, tileIdx) {
     if (!_assertConnected()) return;
     _room.send('deploy_structure', { cardId, tileIdx });
     log('s', `Deploying structure ${cardId} to tile ${tileIdx}…`);
   }
 
-  /**
-   * Draw a card from a deck.
-   * Server validates draw phase + deck count, then sends "draw_result".
-   */
   function drawCard(deckType) {
     if (!_assertConnected()) return;
     _room.send('draw_card', { deckType });
   }
 
-  /**
-   * Use a unit's active ability.
-   */
   function useAbility(unitId, abilityIndex, options = {}) {
     if (!_assertConnected()) return;
     _room.send('ability_use', { unitId, abilityIndex, ...options });
     log('a', `${unitId} activates ability ${abilityIndex}`);
   }
 
-  /**
-   * Start a Structure capture attempt.
-   * Server tracks the 1–2 round timer based on unit count.
-   */
   function captureStructure(unitId, structureTile) {
     if (!_assertConnected()) return;
     _room.send('capture_start', { unitId, structureTile });
     log('s', `${unitId} attempting to capture structure at tile ${structureTile}`);
   }
 
-  /**
-   * Declare a Siege on the opponent's Empire (requires 5 surrounding units).
-   */
   function declareSiege(unitIds) {
     if (!_assertConnected()) return;
     _room.send('siege_declare', { unitIds });
     log('a', `SIEGE DECLARED with ${unitIds.length} units!`);
   }
 
-  /**
-   * End your turn — server transitions to opponent's Standby phase.
-   */
   function endTurn() {
     if (!_assertConnected()) return;
     _room.send('end_turn', {});
@@ -943,9 +752,6 @@ function _handlePhaseChange(data) {
     toast('Turn ended. Waiting for opponent…');
   }
 
-  /**
-   * Concede the match.
-   */
   function concede() {
     if (!_assertConnected()) return;
     if (confirm('Concede the match? This counts as a loss.')) {
@@ -966,40 +772,23 @@ function _handlePhaseChange(data) {
     return true;
   }
 
-  /**
-   * Is it currently this client's turn?
-   */
   function isMyTurnNow() {
-    // If M has a phase reference use that, otherwise we can't know without state
     if (typeof M !== 'undefined' && M._isMyTurn) return M._isMyTurn();
     return false;
   }
 
-  /**
-   * Returns whether a Storm chain is currently active.
-   * Use this to decide whether to show the Reaction button.
-   */
   function isStormActive() {
     return _stormActive;
   }
 
-  /**
-   * Clean disconnect — call when the player leaves the match screen normally.
-   */
   function disconnect() {
     clearTimeout(_matchTimer);
-    if (_room) {
-      _room.leave(true);  // true = clean leave
-      _room = null;
-    }
+    if (_room) { _room.leave(true); _room = null; }
     _mySeat = null;
     _stormActive = false;
     _hideStormUI();
   }
 
-  /**
-   * Debug helper — logs current room state to console.
-   */
   function debugState() {
     console.log('[NET] Seat:', _mySeat);
     console.log('[NET] Room:', _room?.roomId, '| Session:', _room?.sessionId);
@@ -1026,7 +815,7 @@ function _handlePhaseChange(data) {
     // Chat
     sendChat,
 
-    // Player actions (send to server)
+    // Player actions
     requestMoves,
     moveUnit,
     requestTargets,
@@ -1048,7 +837,7 @@ function _handlePhaseChange(data) {
     disconnect,
     debugState,
 
-    // Expose config for easy URL override
+    // Config override
     configure: (opts) => Object.assign(CONFIG, opts),
   };
 
