@@ -318,7 +318,7 @@ export class GameRoom extends Room<GameRoomState> {
     } catch(e) { console.error('[GameRoom] startGame error:', e); }
   }
 
-  // ============================================================
+// ============================================================
   // MESSAGE ROUTER
   // ============================================================
 
@@ -388,31 +388,32 @@ export class GameRoom extends Room<GameRoomState> {
       return;
     }
 
-    const phaseStr = String(this.gs.currentPhase).toUpperCase().replace('PHASE.', '');
-    switch (phaseStr) {
+    // ── ROBUST PHASE MATCHING ──────────────────────────────────
+    // Phase enum may be numeric (0,1,2...) or string. Normalize to
+    // the lowercase string form that phaseToString() produces.
+    const currentPhaseStr = this.phaseToString(this.gs.currentPhase);
+    console.log('[GameRoom] handleMessage:', msg.type, '| phase:', currentPhaseStr, '| rawPhase:', this.gs.currentPhase, '| activePlayer:', this.gs.activePlayerId, '| sender:', client.sessionId);
 
-      case String(Phase.SETUP_TILES).toUpperCase():
-      case 'SETUP_TILES':
+    switch (currentPhaseStr) {
+
+      case 'setup_tiles':
         if (playerId !== this.gs.activePlayerId) {
           client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn to place tiles." });
           return;
         }
-        if (msg.type === "place_tile")       this.handlePlaceTile(client, (msg as any).tileId, (msg as any).tileType);
+        if (msg.type === "place_tile")         this.handlePlaceTile(client, (msg as any).tileId, (msg as any).tileType);
         if (msg.type === "end_tile_placement") this.handleEndTilePlacement(client);
         break;
 
-      case String(Phase.SETUP_EMPIRE).toUpperCase():
-      case 'SETUP_EMPIRE':
+      case 'setup_empire':
         if (msg.type === "place_empire") this.handlePlaceEmpire(client, (msg as any).tileId);
         break;
 
-      case String(Phase.STANDBY).toUpperCase():
-      case 'STANDBY':
+      case 'standby':
         // Server-driven — no client actions during standby
         break;
 
-      case String(Phase.DRAW).toUpperCase():
-      case 'DRAW':
+      case 'draw':
         if (playerId !== this.gs.activePlayerId) {
           client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
           return;
@@ -420,8 +421,7 @@ export class GameRoom extends Room<GameRoomState> {
         if (msg.type === "draw_card") this.handleDrawCard(client, (msg as any).deck ?? (msg as any).deckType);
         break;
 
-      case String(Phase.MAIN).toUpperCase():
-      case 'MAIN':
+      case 'main':
         if (playerId !== this.gs.activePlayerId) {
           client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
           return;
@@ -448,9 +448,12 @@ export class GameRoom extends Room<GameRoomState> {
           this.handleEndTurn(client);
         break;
 
-      case String(Phase.END).toUpperCase():
-      case 'END':
+      case 'end':
         // End phase is server-driven
+        break;
+
+      default:
+        console.warn('[GameRoom] handleMessage: unmatched phase:', currentPhaseStr, '| raw:', this.gs.currentPhase, '| msg:', msg.type);
         break;
     }
     } catch(e) { console.error('[GameRoom] handleMessage error:', e); client.send('error', { code: 'SERVER_ERROR', message: String(e) }); }
