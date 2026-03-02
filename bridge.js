@@ -1212,6 +1212,13 @@ document.addEventListener('DOMContentLoaded', function () {
   function onGameStart(seat, initialState) {
     CS.mySeat = seat;
     window._zbMySeat = seat;
+
+    // FIX: if activePlayerId got corrupted before seat was known, re-derive it now
+    if (CS.activeSessionId) {
+      const myId = window._zbRoom?.sessionId;
+      CS.activePlayerId = (CS.activeSessionId === myId) ? seat : (seat === 'p1' ? 'p2' : 'p1');
+      console.log('[ZB] Re-derived activePlayerId after seat set:', CS.activePlayerId);
+    }
     // Capture sessionId from room if available
     if (window._zbRoom && window._zbRoom.sessionId) {
       CS.mySessionId = window._zbRoom.sessionId;
