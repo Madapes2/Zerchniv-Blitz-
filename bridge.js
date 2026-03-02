@@ -1343,12 +1343,23 @@ document.addEventListener('DOMContentLoaded', function () {
     renderHand();
   }
 
+  function _normalizePhase(p) {
+  if (!p && p !== 0) return p;
+  const map = {
+    '0': 'setup_tiles', '1': 'setup_empire', '2': 'standby',
+    '3': 'draw', '4': 'main', '5': 'end',
+    'SETUP_TILES': 'setup_tiles', 'SETUP_EMPIRE': 'setup_empire',
+    'STANDBY': 'standby', 'DRAW': 'draw', 'MAIN': 'main', 'END': 'end',
+  };
+  return map[String(p)] ?? String(p).toLowerCase();
+}
+
   function onStateChange(state) {
     // Called when Colyseus patches arrive
     if (!state) return;
 
     // Phase / active player — schema sends sessionId; broadcasts send seat label
-    const incomingPhase  = state.currentPhase ?? state.phase;
+    const incomingPhase = _normalizePhase(state.currentPhase ?? state.phase);
     const incomingActive = state.activePlayerId ?? state.activePlayer; // may be sessionId
 
     if (incomingPhase !== undefined) {
