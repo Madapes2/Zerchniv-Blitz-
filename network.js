@@ -679,6 +679,7 @@
   }
 
 function _handlePhaseChange(data) {
+  console.log('[NET] _handlePhaseChange received:', JSON.stringify(data));
   /*
    * data: { phase, turn, activePlayer }
    */
