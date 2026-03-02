@@ -1255,13 +1255,18 @@ document.addEventListener('DOMContentLoaded', function () {
     // Poll for state updates — if still waiting and active player hasn't switched to us,
     // request a fresh state from server every 3 seconds
     const _statePollId = setInterval(() => {
-      if (!CS.mySeat || !_getRoom()) { clearInterval(_statePollId); return; }
-      // If it's been setup_tiles for a while and we're not active, ask server for current state
+      if (!CS.mySeat) { clearInterval(_statePollId); return; }
+      const room = _getRoom();
+      if (!room) return;
+      // Check if room connection is open
+      const ws = room.connection?.transport?.ws;
+      const connected = !ws || ws.readyState === 1; // 1 = OPEN
+      if (!connected) { console.log('[ZB] Poll skipped — not connected'); return; }
       if ((CS.currentPhase || '').includes('setup') && !isMyTurn()) {
         console.log('[ZB] Polling for state update...');
         send('request_state', {});
       } else {
-        clearInterval(_statePollId); // Stop polling once we're active or past setup
+        clearInterval(_statePollId);
       }
     }, 3000);
     // Stop polling after 60s regardless
@@ -1554,3 +1559,4 @@ document.addEventListener('DOMContentLoaded', function () {
   console.log('[SERVER CLIENT] Loaded');
 
 })();
+
