@@ -678,27 +678,33 @@
     }
   }
 
-  function _handlePhaseChange(data) {
-    /*
-     * data: { phase, turn, activePlayer }
-     */
-    const isMyTurnNow = data.activePlayer === _mySeat;
-    const phaseLabel = {
-      standby: 'STANDBY', draw: 'DRAW', main: 'MAIN', end: 'END'
-    }[data.phase] || data.phase.toUpperCase();
+function _handlePhaseChange(data) {
+  /*
+   * data: { phase, turn, activePlayer }
+   */
+  const isMyTurnNow = data.activePlayer === _mySeat;
 
-    if (typeof M !== 'undefined' && M._setPhase) {
-      M._setPhase(data.phase, data.turn, isMyTurnNow);
-    }
-
-    if (isMyTurnNow) {
-      log('s', `═══ YOUR TURN — Turn ${data.turn} · ${phaseLabel} Phase ═══`);
-      toast(`Turn ${data.turn} — ${phaseLabel} Phase — Your turn!`);
-    } else {
-      log('d', `Opponent's turn — ${phaseLabel} Phase`);
-      toast(`Turn ${data.turn} — ${phaseLabel} Phase — Waiting for opponent…`);
-    }
+  // Forward to ZB
+  if (window.ZB && window.ZB.onPhaseChange) {
+    window.ZB.onPhaseChange(data.phase, data.activePlayer);
   }
+
+  if (typeof M !== 'undefined' && M._setPhase) {
+    M._setPhase(data.phase, data.turn, isMyTurnNow);
+  }
+
+  const phaseLabel = {
+    standby: 'STANDBY', draw: 'DRAW', main: 'MAIN', end: 'END'
+  }[data.phase] || data.phase.toUpperCase();
+
+  if (isMyTurnNow) {
+    log('s', `═══ YOUR TURN — Turn ${data.turn} · ${phaseLabel} Phase ═══`);
+    toast(`Turn ${data.turn} — ${phaseLabel} Phase — Your turn!`);
+  } else {
+    log('d', `Opponent's turn — ${phaseLabel} Phase`);
+    toast(`Turn ${data.turn} — ${phaseLabel} Phase — Waiting for opponent…`);
+  }
+}
 
   function _handleGameOver(data) {
     /*
