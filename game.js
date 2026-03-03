@@ -629,13 +629,15 @@ class HexBoardScene extends Phaser.Scene {
   // Call this whenever you receive a full state update from Colyseus
   applyServerState(state) {
     // 1. Tiles
-    if (state.tiles) {
-      state.tiles.forEach(st => {
-        const tile = this.tiles.find(t => t.id === st.id);
-        if (!tile) return;
-        tile.type = st.type;
-      });
-    }
+      if (state.tiles) {
+    Object.entries(state.tiles).forEach(([tileId, st]) => {
+      // Server tile IDs are like "r3c5" — match against tile's row/col string
+      const tile = this.tiles.find(t => `r${t.row}c${t.col}` === tileId);
+      if (!tile) return;
+      tile.type = st.tileType ?? st.type ?? 'neutral';
+      if (st.revealed) tile.highlight = HL.NONE;
+    });
+  }
 
     // 2. Units — add/remove/move tokens
     if (state.units) {
