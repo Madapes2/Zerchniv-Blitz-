@@ -573,16 +573,30 @@ export class GameRoom extends Room<GameRoomState> {
         // Pass tile placement turn to the other player
         this.gs.activePlayerId = otherPlayerId;
         addLog(this.gs, `${this.getPlayerName(otherPlayerId)} now places their tiles.`);
-        console.log(`[GameRoom] handleEndTilePlacement — passing turn to ${otherSeat} (${otherPlayerId})`);
-        this.broadcastPhaseChange();
+        console.log(`[GameRoom] handleEndTilePlacement — passing turn to ${otherSeat} (${otherPlayerId}) | verified: ${this.gs.activePlayerId}`);
+
+        // State FIRST so activePlayer is current, then phase_change
         this.broadcastStateUpdate();
+        this.broadcastPhaseChange();
+
+        // Explicit turn_pass message so client can reliably flip isMyTurn
+        this.clients.forEach(c => {
+          const seat = this.getSeat(c.sessionId);
+          c.send("turn_pass", {
+            activePlayer: otherSeat,
+            phase: "setup_tiles",
+            isMyTurn: c.sessionId === otherPlayerId,
+          });
+        });
       } else {
         // Both done — move to empire placement
         this.gs.currentPhase = String(Phase.SETUP_EMPIRE);
         addLog(this.gs, "Both players placed tiles. Now place your Empires.");
         console.log('[GameRoom] handleEndTilePlacement — both done, advancing to setup_empire');
-        this.broadcastPhaseChange();
+
+        // State FIRST, then phase_change
         this.broadcastStateUpdate();
+        this.broadcastPhaseChange();
       }
     } catch(e) {
       console.error('[GameRoom] handleEndTilePlacement error:', e);
