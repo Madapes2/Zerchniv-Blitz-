@@ -81,7 +81,7 @@
   //  CONFIG — update SERVER_URL to your Colyseus Cloud instance
   // ────────────────────────────────────────────────────────────────
   const CONFIG = {
-    SERVER_URL: 'wws://us-mia-55cdd0b8.colyseus.cloud',  // ← CHANGE THIS
+    SERVER_URL: 'https://us-mia-55cdd0b8.colyseus.cloud',  // ← CHANGE THIS
     ROOM_NAME:  'game_room',
     RECONNECT_ATTEMPTS: 3,
     MATCHMAKING_TIMEOUT_MS: 30000,
@@ -466,17 +466,12 @@
     }
   }
 
-  function _handleConnectionError(err) {
-    console.error('[NET] Could not connect to server:', err);
-    clearTimeout(_matchTimer);
-    if (typeof cl === 'function') cl('mmod');
-
-    // Let the player fight AI instead
-    toast('Could not connect to server — launching AI match instead.');
-    if (typeof launchMatch === 'function') {
-      setTimeout(launchMatch, 600);
-    }
-  }
+function _handleConnectionError(err) {
+  console.error('[NET] Could not connect to server:', err);
+  clearTimeout(_matchTimer);
+  if (typeof cl === 'function') cl('mmod');
+  toast('Could not connect to server. Check console for details.');
+}
 
   // ────────────────────────────────────────────────────────────────
   //  LAUNCH MATCH from server state
