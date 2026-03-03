@@ -23,6 +23,13 @@
  *  _handlePhaseChange is the SINGLE entry point for all phase updates.
  *  It calls ZB.onPhaseChange FIRST, then M._setPhase.
  *  bridge.js onStateChange NEVER updates phase — tiles/units only.
+ *
+ *  TURN PASS CONTRACT (setup_tiles)
+ *  ─────────────────────────────────
+ *  During setup_tiles, the server sends an explicit 'turn_pass' message
+ *  after broadcastStateUpdate + broadcastPhaseChange. This is the single
+ *  authoritative signal for flipping isMyTurn. state_update does NOT
+ *  call _handlePhaseChange during setup_tiles to avoid race conditions.
  * ═══════════════════════════════════════════════════════════════════
  */
 
@@ -273,6 +280,29 @@
       _handlePhaseChange(data);
     });
 
+    // ── TURN PASS — authoritative isMyTurn flip during setup_tiles ──
+    // Server sends this AFTER broadcastStateUpdate + broadcastPhaseChange
+    // so activePlayer is guaranteed current. This is the single reliable
+    // signal for flipping isMyTurn during tile placement.
+    _room.onMessage('turn_pass', (data) => {
+      console.log('[NET] turn_pass received:', JSON.stringify(data));
+      const isMyTurnNow = data.activePlayer === _mySeat;
+
+      if (window.ZB && window.ZB.onPhaseChange) {
+        window.ZB.onPhaseChange(data.phase, data.activePlayer);
+      }
+
+      if (typeof M !== 'undefined' && M._setPhase) {
+        M._setPhase(data.phase, null, isMyTurnNow);
+      }
+
+      const who = isMyTurnNow
+        ? 'YOUR TURN — Place your tiles'
+        : 'Waiting for opponent to place tiles…';
+      log('s', `⇄ Turn passed — ${who}`);
+      toast(who);
+    });
+
     _room.onMessage('essence_update', (data) => {
       if (typeof M !== 'undefined' && M._setEssence) {
         M._setEssence(data);
@@ -456,8 +486,10 @@
       M._setHand(me.hand);
     }
 
-    // Phase from state_update — route through _handlePhaseChange
-    if (state.phase) {
+    // During setup_tiles, phase/turn updates come via 'turn_pass' message
+    // to avoid race conditions with broadcastPhaseChange ordering.
+    // All other phases update normally through _handlePhaseChange.
+    if (state.phase && state.phase !== 'setup_tiles') {
       _handlePhaseChange({
         phase:        state.phase,
         turn:         state.turn,
@@ -535,6 +567,8 @@
   //   1. ZB.onPhaseChange — updates CS.currentPhase, CS.activePlayerId, renders hand
   //   2. M._setPhase     — updates phase pills, Phaser isMyTurn flag
   //
+  // NOTE: During setup_tiles, isMyTurn is driven by 'turn_pass' messages,
+  // not by this function, to prevent race conditions.
   // bridge.js onStateChange NEVER calls this — tiles/units only.
   function _handlePhaseChange(data) {
     console.log('[NET] _handlePhaseChange received:', JSON.stringify(data));
