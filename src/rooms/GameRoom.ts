@@ -1,5 +1,8 @@
 import { Room, Client } from "colyseus";
-import { GameRoomState, PlayerState, UnitInstance, StructureInstance, BuilderInstance, Tile, Empire } from "./schema/GameRoomState.js";
+import {
+  GameRoomState, PlayerState, UnitInstance, StructureInstance,
+  BuilderInstance, Tile, Empire
+} from "./schema/GameRoomState.js";
 import {
   Phase, GameResult, Element, CardType,
   CARD_DEFINITIONS, UnitCardDef, BlitzCardDef, StructureCardDef,
@@ -15,31 +18,47 @@ import {
 
 // ============================================================
 // MESSAGE TYPES (client → server)
+// network.js sends these exact type strings — keep in sync.
 // ============================================================
 type Msg =
-  | { type: "place_tile"; tileId: string; tileType: string }
+  // Setup
+  | { type: "place_tile";          tileId: string; tileType: string }
   | { type: "end_tile_placement" }
-  | { type: "place_empire"; tileId: string }
-  | { type: "draw_card"; deck: "unit" | "blitz" }
-  | { type: "move_unit"; unitId: string; targetTileId: string }
-  | { type: "melee_attack"; attackerUnitId: string; targetId: string }
-  | { type: "ranged_attack"; attackerUnitId: string; targetId: string }
-  | { type: "play_unit"; cardId: string; spawnTileId: string }
-  | { type: "play_blitz"; cardId: string; targetId?: string }
-  | { type: "play_structure"; cardId: string; tileId: string }
-  | { type: "place_builder"; tileId: string }
-  | { type: "use_terraform"; unitId: string }
+  | { type: "place_empire";        tileId: string }
+  // Draw — network.js uses "deckType", GameLogic used "deck"; accept both
+  | { type: "draw_card";           deck?: "unit" | "blitz"; deckType?: "unit" | "blitz" }
+  // Move / combat
+  | { type: "move_unit";           unitId: string; toTile?: string; targetTileId?: string }
+  | { type: "melee_attack";        attackerUnitId: string; targetId: string }
+  | { type: "ranged_attack";       attackerUnitId: string; targetId: string }
+  | { type: "declare_attack";      unitId: string; targetTile: string; mode: "melee" | "ranged" }
+  // Cards — network.js uses "deploy_unit"; accept both names
+  | { type: "play_unit";           cardId: string; spawnTileId?: string; tileIdx?: number }
+  | { type: "deploy_unit";         cardId: string; tileIdx?: number; spawnTileId?: string }
+  | { type: "play_blitz";          cardId: string; targetId?: string; targetTile?: number }
+  | { type: "play_structure";      cardId: string; tileId?: string; tileIdx?: number }
+  | { type: "deploy_structure";    cardId: string; tileId?: string; tileIdx?: number }
+  // Misc
+  | { type: "place_builder";       tileId: string }
+  | { type: "use_terraform";       unitId: string }
   | { type: "end_turn" }
-  | { type: "react_blitz"; cardId: string }
+  | { type: "react_blitz";         cardId: string }
+  | { type: "play_reaction";       cardId: string; stormId?: string; reactingToId?: string }
   | { type: "pass_reaction" }
   | { type: "request_valid_moves"; unitId: string }
-  | { type: "request_valid_targets"; unitId: string; attackType: "melee" | "ranged" };
+  | { type: "request_moves";       unitId: string }
+  | { type: "request_valid_targets"; unitId: string; attackType: "melee" | "ranged" }
+  | { type: "request_targets";     unitId: string; mode: "melee" | "ranged" }
+  | { type: "send_chat";           text: string }
+  | { type: "ability_use";         unitId: string; abilityIndex: number; targetId?: string; targetTile?: number; essenceCost: any }
+  | { type: "concede" };
 
-export class GameRoom extends Room<{ state: GameRoomState }> {
+export class GameRoom extends Room<GameRoomState> {
 
   private instanceCounter = 0;
+  // Map sessionId → seat label ("p1" | "p2")
+  private seatMap = new Map<string, "p1" | "p2">();
 
-  // Typed accessor so this.state is always GameRoomState
   get gs(): GameRoomState {
     return this.state as GameRoomState;
   }
@@ -52,33 +71,210 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
       this.handleMessage(client, { type, ...message } as Msg);
     });
 
-    addLog(this.gs, "Room created. Waiting for players...");
+    addLog(this.gs, "Room created. Waiting for players…");
   }
 
   onJoin(client: Client, options: any) {
-    const player = new PlayerState();
-    player.sessionId = client.sessionId;
-    player.displayName = options?.displayName ?? `Player ${this.gs.players.size + 1}`;
+    try {
+      const player = new PlayerState();
+      player.sessionId = client.sessionId;
+      player.displayName = options?.displayName ?? `Player ${this.gs.players.size + 1}`;
 
-    // Load decks from options (sent by the deckbuilder)
-    if (options?.unitDeck) options.unitDeck.forEach((id: string) => player.unitDeck.push(id));
-    if (options?.blitzDeck) options.blitzDeck.forEach((id: string) => player.blitzDeck.push(id));
-    if (options?.extraDeck) options.extraDeck.forEach((id: string) => player.extraDeck.push(id));
+      // Assign seat labels in join order
+      const seat: "p1" | "p2" = this.seatMap.size === 0 ? "p1" : "p2";
+      this.seatMap.set(client.sessionId, seat);
+      (player as any).seat = seat;
 
-    // Shuffle decks
-    shuffleDeck(player.unitDeck);
-    shuffleDeck(player.blitzDeck);
+      // Load decks from options
+      if (options?.unitDeck)  options.unitDeck.forEach((id: string)  => player.unitDeck.push(id));
+      if (options?.blitzDeck) options.blitzDeck.forEach((id: string) => player.blitzDeck.push(id));
+      if (options?.extraDeck) options.extraDeck.forEach((id: string) => player.extraDeck.push(id));
 
-    this.gs.players.set(client.sessionId, player);
-    addLog(this.gs, `${player.displayName} joined.`);
+      shuffleDeck(player.unitDeck);
+      shuffleDeck(player.blitzDeck);
 
-    if (this.gs.players.size === 2) {
-      this.startGame();
-    }
+      // Set tile budgets (19 neutral, 10 elemental per player for 58-tile board)
+      if ('neutralTilesRemaining'   in player) player.neutralTilesRemaining   = (typeof NEUTRAL_TILES_PER_PLAYER   !== 'undefined') ? NEUTRAL_TILES_PER_PLAYER   : 19;
+      if ('elementalTilesRemaining' in player) player.elementalTilesRemaining = (typeof ELEMENTAL_TILES_PER_PLAYER !== 'undefined') ? ELEMENTAL_TILES_PER_PLAYER : 10;
+      // Side-channel budget map (fallback if schema fields missing)
+      (this as any)._tileBudgets = (this as any)._tileBudgets || new Map();
+      (this as any)._tileBudgets.set(client.sessionId, { neutral: 19, elemental: 10 });
+
+      this.gs.players.set(client.sessionId, player);
+      console.log(`[GameRoom] onJoin — seat: ${seat} | sessionId: ${client.sessionId} | total players: ${this.gs.players.size}`);
+      addLog(this.gs, `${player.displayName} joined as ${seat}.`);
+
+      if (this.clients.length === 2) {
+        this.startGame();
+      }
+    } catch(e) { console.error('[GameRoom] onJoin error:', e); }
   }
 
   onLeave(client: Client) {
-    addLog(this.gs, `Player disconnected: ${client.sessionId}`);
+    const p = this.gs.players.get(client.sessionId);
+    const seat = this.seatMap.get(client.sessionId) ?? "?";
+    addLog(this.gs, `${p?.displayName ?? client.sessionId} (${seat}) disconnected.`);
+    this.gs.players.delete(client.sessionId);
+    this.broadcast("player_left", { seat });
+  }
+
+  // ============================================================
+  // SEAT HELPERS
+  // ============================================================
+
+  private getSeat(sessionId: string): "p1" | "p2" {
+    return this.seatMap.get(sessionId) ?? "p1";
+  }
+
+  private getSessionBySeat(seat: "p1" | "p2"): string | null {
+    for (const [sid, s] of this.seatMap) { if (s === seat) return sid; }
+    return null;
+  }
+
+  private getActiveSeat(): "p1" | "p2" {
+    return this.getSeat(this.gs.activePlayerId);
+  }
+
+  private getOtherSeat(seat: "p1" | "p2"): "p1" | "p2" {
+    return seat === "p1" ? "p2" : "p1";
+  }
+
+  // ============================================================
+  // BROADCAST HELPERS — keep network.js contract
+  // ============================================================
+
+  /** Broadcast phase_change to all clients using seat labels. */
+  private broadcastPhaseChange() {
+    const activeSeat = this.getActiveSeat();
+    const phaseStr   = this.phaseToString(this.gs.currentPhase);
+    console.log(`[GameRoom] broadcastPhaseChange — phase: ${phaseStr} | activePlayer: ${activeSeat} | activePlayerId: ${this.gs.activePlayerId}`);
+    this.broadcast("phase_change", {
+      phase:        phaseStr,
+      turn:         this.gs.roundNumber,
+      activePlayer: activeSeat,   // always "p1" or "p2"
+    });
+  }
+
+  /** Send a full state_update snapshot to both clients. */
+  private broadcastStateUpdate() {
+    try {
+      const activeSeat = this.getActiveSeat();
+      this.clients.forEach(client => {
+        try {
+          const mySeat  = this.getSeat(client.sessionId);
+          const myId    = client.sessionId;
+          const oppSeat = this.getOtherSeat(mySeat);
+          const oppId   = this.getSessionBySeat(oppSeat);
+          const me      = this.gs.players.get(myId);
+          const opp     = (oppId && oppId.length > 0) ? this.gs.players.get(oppId) : null;
+
+          client.send("state_update", {
+            state: {
+              phase:        this.phaseToString(this.gs.currentPhase),
+              turn:         this.gs.roundNumber,
+              activePlayer: activeSeat,
+              players: {
+                [mySeat]: me ? this.serializePlayerForSelf(me) : null,
+                [oppSeat]: opp ? this.serializePlayerForOpponent(opp) : null,
+              },
+              units:   this.serializeUnits(mySeat),
+              tiles:   this.serializeTiles(),
+              empires: this.serializeEmpires(),
+            }
+          });
+        } catch(innerE) {
+          console.error('[GameRoom] broadcastStateUpdate inner error for client', client.sessionId, ':', innerE);
+        }
+      });
+    } catch(e) {
+      console.error('[GameRoom] broadcastStateUpdate error:', e);
+    }
+  }
+
+  private phaseToString(phase: any): string {
+    const map: Record<string, string> = {
+      [Phase.SETUP_TILES]:  "setup_tiles",
+      [Phase.SETUP_EMPIRE]: "setup_empire",
+      [Phase.STANDBY]:      "standby",
+      [Phase.DRAW]:         "draw",
+      [Phase.MAIN]:         "main",
+      [Phase.END]:          "end",
+    };
+    return map[String(phase)] ?? String(phase).toLowerCase();
+  }
+
+  private serializePlayerForSelf(p: PlayerState) {
+    try {
+      return {
+        username:        p.displayName,
+        hp:              p.empire?.currentHp ?? 20,
+        essence:         { n: p.essence?.neutral ?? 0, f: p.essence?.fire ?? 0, w: p.essence?.water ?? 0 },
+        hand:            p.hand ? [...p.hand] : [],
+        unitDeckCount:   p.unitDeck?.length ?? 0,
+        blitzDeckCount:  p.blitzDeck?.length ?? 0,
+        discardCount:    p.discardPile?.length ?? 0,
+        neutralTilesRemaining:   p.neutralTilesRemaining ?? 19,
+        elementalTilesRemaining: p.elementalTilesRemaining ?? 10,
+        tileSetupComplete: p.tileSetupComplete ?? false,
+        empireSet:       p.empireSet ?? false,
+      };
+    } catch(e) {
+      console.error('[GameRoom] serializePlayerForSelf error:', e);
+      return { username: p?.displayName || 'Player', hp: 20, essence: {n:0,f:0,w:0}, hand: [], unitDeckCount: 0, blitzDeckCount: 0, discardCount: 0 };
+    }
+  }
+
+  private serializePlayerForOpponent(p: PlayerState) {
+    try {
+      return {
+        username:       p.displayName ?? 'Player',
+        hp:             p.empire?.currentHp ?? 20,
+        unitDeckCount:  p.unitDeck?.length ?? 0,
+        blitzDeckCount: p.blitzDeck?.length ?? 0,
+        discardCount:   p.discardPile?.length ?? 0,
+        tileSetupComplete: p.tileSetupComplete ?? false,
+        empireSet:      p.empireSet ?? false,
+      };
+    } catch(e) {
+      return { username: 'Player', hp: 20, unitDeckCount: 0, blitzDeckCount: 0, discardCount: 0 };
+    }
+  }
+
+  private serializeUnits(viewerSeat: "p1" | "p2") {
+    const units: any[] = [];
+    this.gs.units.forEach((u: UnitInstance) => {
+      const ownerSeat = this.getSeat(u.ownerId);
+      units.push({
+        instanceId:          u.instanceId,
+        cardId:              u.cardId,
+        owner:               ownerSeat,
+        tileId:              u.tileId,
+        currentHp:           u.currentHp,
+        hasMovedThisTurn:    u.hasMovedThisTurn,
+        hasAttackedThisTurn: u.hasAttackedThisTurn,
+        hasDevelopmentRest:  u.hasDevelopmentRest,
+      });
+    });
+    return units;
+  }
+
+  private serializeTiles() {
+    const tiles: Record<string, any> = {};
+    try {
+      this.gs.tiles.forEach((t: Tile, id: string) => {
+        if (t && id) tiles[id] = { tileType: t.tileType, revealed: t.revealed, occupiedBy: t.occupiedBy };
+      });
+    } catch(e) { console.error('[GameRoom] serializeTiles error:', e); }
+    return tiles;
+  }
+
+  private serializeEmpires() {
+    const empires: Record<string, any> = {};
+    this.gs.players.forEach((p: PlayerState, sid: string) => {
+      const seat = this.getSeat(sid);
+      empires[seat] = { tileId: p.empire?.tileId, hp: p.empire?.currentHp ?? 20 };
+    });
+    return empires;
   }
 
   // ============================================================
@@ -86,16 +282,41 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   // ============================================================
 
   private startGame() {
-    // Randomly pick who goes first
-    const playerIds = Array.from(this.gs.players.keys());
-    const flip = Math.random() < 0.5;
-    this.gs.activePlayerId = flip ? playerIds[0] : playerIds[1];
+    try {
+      const playerIds = Array.from(this.gs.players.keys());
+      const flip = Math.random() < 0.5;
+      this.gs.activePlayerId = flip ? playerIds[0] : playerIds[1];
 
-    this.gs.currentPhase = Phase.SETUP_TILES;
-    addLog(this.gs, `Game started! ${this.getPlayerName(this.gs.activePlayerId)} places tiles first.`);
+      // FIX: use String(Phase.SETUP_TILES) directly — never use || fallback
+      // which breaks when Phase.SETUP_TILES = 0 (falsy)
+      this.gs.currentPhase = String(Phase.SETUP_TILES);
+      this.gs.roundNumber  = 1;
 
-    // Send starting hand guarantee: each player picks 1 unit from their deck
-    // (handled by draw on first turn — guaranteed via deck ordering in deckbuilder)
+      const activeSeat = this.getActiveSeat();
+      console.log(`[GameRoom] startGame — activePlayerId: ${this.gs.activePlayerId} | activeSeat: ${activeSeat} | phase: ${this.phaseToString(this.gs.currentPhase)}`);
+      addLog(this.gs, `Game started! ${this.getPlayerName(this.gs.activePlayerId)} places tiles first.`);
+
+      // Send game_start to each client individually with their seat label
+      this.clients.forEach(client => {
+        const seat = this.getSeat(client.sessionId);
+        console.log(`[GameRoom] Sending game_start to ${seat} (${client.sessionId})`);
+        client.send("game_start", {
+          yourSeat: seat,
+          state: {
+            phase:        "setup_tiles",
+            turn:         1,
+            activePlayer: activeSeat,
+            players: {
+              [seat]: this.serializePlayerForSelf(this.gs.players.get(client.sessionId)!),
+              [this.getOtherSeat(seat)]: null,
+            },
+            units:   [],
+            tiles:   {},
+            empires: {},
+          }
+        });
+      });
+    } catch(e) { console.error('[GameRoom] startGame error:', e); }
   }
 
   // ============================================================
@@ -103,62 +324,147 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   // ============================================================
 
   private handleMessage(client: Client, msg: Msg) {
-    const playerId = client.sessionId;
-    const player = this.gs.players.get(playerId);
-    if (!player) return;
+    try {
+      const playerId = client.sessionId;
+      const player   = this.gs.players.get(playerId);
+      if (!player) return;
 
-    // Reaction window — only the reacting player can act
-    if (this.gs.awaitingReaction) {
-      if (msg.type === "react_blitz" && playerId === this.gs.reactionFromPlayerId) {
-        this.handleReactBlitz(client, msg.cardId);
-      } else if (msg.type === "pass_reaction" && playerId === this.gs.reactionFromPlayerId) {
-        this.resolveReactionWindow();
+      // Reaction window
+      if (this.gs.awaitingReaction) {
+        if ((msg.type === "react_blitz" || msg.type === "play_reaction") && playerId === this.gs.reactionFromPlayerId) {
+          this.handleReactBlitz(client, (msg as any).cardId);
+        } else if (msg.type === "pass_reaction" && playerId === this.gs.reactionFromPlayerId) {
+          this.resolveReactionWindow();
+        }
+        return;
       }
-      return;
-    }
 
-    // Info requests — always allowed
-    if (msg.type === "request_valid_moves") {
-      this.sendValidMoves(client, msg.unitId);
-      return;
-    }
-    if (msg.type === "request_valid_targets") {
-      this.sendValidTargets(client, msg.unitId, msg.attackType);
-      return;
-    }
+      // State sync request — always allowed
+      if (msg.type === "request_state") {
+        try {
+          const seat    = this.getSeat(client.sessionId);
+          const myId    = client.sessionId;
+          const oppSeat = this.getOtherSeat(seat);
+          const oppId   = this.getSessionBySeat(oppSeat);
+          const me      = this.gs.players.get(myId);
+          const opp     = oppId ? this.gs.players.get(oppId) : null;
+          const activeSeat = this.getActiveSeat();
+          const phaseStr   = this.phaseToString(this.gs.currentPhase);
 
-    switch (this.gs.currentPhase) {
-      case Phase.SETUP_TILES:
-        if (playerId !== this.gs.activePlayerId) return;
-        if (msg.type === "place_tile") this.handlePlaceTile(client, msg.tileId, msg.tileType);
-        if (msg.type === "end_tile_placement") this.handleEndTilePlacement(client);
-        break;
+          console.log(`[GameRoom] request_state from ${seat} — phase: ${phaseStr} | activePlayer: ${activeSeat}`);
 
-      case Phase.SETUP_EMPIRE:
-        if (msg.type === "place_empire") this.handlePlaceEmpire(client, msg.tileId);
-        break;
+          client.send("state_update", {
+            state: {
+              phase:        phaseStr,
+              turn:         this.gs.roundNumber,
+              activePlayer: activeSeat,
+              players: {
+                [seat]:    me  ? this.serializePlayerForSelf(me)      : null,
+                [oppSeat]: opp ? this.serializePlayerForOpponent(opp) : null,
+              },
+              units:   this.serializeUnits(seat),
+              tiles:   this.serializeTiles(),
+              empires: this.serializeEmpires(),
+            }
+          });
+          // Also send phase_change so client handlers fire
+          client.send("phase_change", {
+            phase:        phaseStr,
+            turn:         this.gs.roundNumber,
+            activePlayer: activeSeat,
+          });
+        } catch(e) { console.error("[GameRoom] request_state error:", e); }
+        return;
+      }
 
-      case Phase.DRAW:
-        if (playerId !== this.gs.activePlayerId) return;
-        if (msg.type === "draw_card") this.handleDrawCard(client, msg.deck);
-        break;
+      // Info requests — always allowed
+      if (msg.type === "request_valid_moves" || msg.type === "request_moves") {
+        this.sendValidMoves(client, (msg as any).unitId);
+        return;
+      }
+      if (msg.type === "request_valid_targets" || msg.type === "request_targets") {
+        this.sendValidTargets(client, (msg as any).unitId, (msg as any).attackType ?? (msg as any).mode);
+        return;
+      }
+      if (msg.type === "send_chat") {
+        this.broadcast("chat_message", { sender: player.displayName, text: (msg as any).text });
+        return;
+      }
+      if (msg.type === "concede") {
+        this.handleConcede(client);
+        return;
+      }
 
-      case Phase.MAIN:
-        if (playerId !== this.gs.activePlayerId) return;
-        if (msg.type === "move_unit") this.handleMoveUnit(client, msg.unitId, msg.targetTileId);
-        if (msg.type === "melee_attack") this.handleMeleeAttack(client, msg.attackerUnitId, msg.targetId);
-        if (msg.type === "ranged_attack") this.handleRangedAttack(client, msg.attackerUnitId, msg.targetId);
-        if (msg.type === "play_unit") this.handlePlayUnit(client, msg.cardId, msg.spawnTileId);
-        if (msg.type === "play_blitz") this.handlePlayBlitz(client, msg.cardId, msg.targetId);
-        if (msg.type === "play_structure") this.handlePlayStructure(client, msg.cardId, msg.tileId);
-        if (msg.type === "place_builder") this.handlePlaceBuilder(client, msg.tileId);
-        if (msg.type === "use_terraform") this.handleTerraform(client, msg.unitId);
-        if (msg.type === "end_turn") this.handleEndTurn(client);
-        break;
+      // Normalize current phase to lowercase string
+      const currentPhaseStr = this.phaseToString(this.gs.currentPhase);
+      console.log(`[GameRoom] handleMessage: ${msg.type} | phase: ${currentPhaseStr} | activePlayer: ${this.gs.activePlayerId} | sender: ${client.sessionId} | senderSeat: ${this.getSeat(client.sessionId)}`);
 
-      case Phase.END:
-        // End phase is server-driven, no client actions
-        break;
+      switch (currentPhaseStr) {
+
+        case 'setup_tiles':
+          if (playerId !== this.gs.activePlayerId) {
+            console.log(`[GameRoom] setup_tiles: NOT your turn — active: ${this.gs.activePlayerId} | sender: ${playerId}`);
+            client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn to place tiles." });
+            return;
+          }
+          if (msg.type === "place_tile")         this.handlePlaceTile(client, (msg as any).tileId, (msg as any).tileType);
+          if (msg.type === "end_tile_placement") this.handleEndTilePlacement(client);
+          break;
+
+        case 'setup_empire':
+          if (msg.type === "place_empire") this.handlePlaceEmpire(client, (msg as any).tileId);
+          break;
+
+        case 'standby':
+          // Server-driven — no client actions during standby
+          break;
+
+        case 'draw':
+          if (playerId !== this.gs.activePlayerId) {
+            client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
+            return;
+          }
+          if (msg.type === "draw_card") this.handleDrawCard(client, (msg as any).deck ?? (msg as any).deckType);
+          break;
+
+        case 'main':
+          if (playerId !== this.gs.activePlayerId) {
+            client.send("error", { code: "NOT_YOUR_TURN", message: "It's not your turn." });
+            return;
+          }
+          if (msg.type === "move_unit")
+            this.handleMoveUnit(client, (msg as any).unitId, (msg as any).toTile ?? (msg as any).targetTileId);
+          if (msg.type === "melee_attack")
+            this.handleMeleeAttack(client, (msg as any).attackerUnitId, (msg as any).targetId);
+          if (msg.type === "ranged_attack")
+            this.handleRangedAttack(client, (msg as any).attackerUnitId, (msg as any).targetId);
+          if (msg.type === "declare_attack")
+            this.handleDeclareAttack(client, (msg as any).unitId, (msg as any).targetTile, (msg as any).mode);
+          if (msg.type === "play_unit" || msg.type === "deploy_unit")
+            this.handlePlayUnit(client, (msg as any).cardId, (msg as any).spawnTileId ?? String((msg as any).tileIdx ?? ""));
+          if (msg.type === "play_blitz")
+            this.handlePlayBlitz(client, (msg as any).cardId, (msg as any).targetId);
+          if (msg.type === "play_structure" || msg.type === "deploy_structure")
+            this.handlePlayStructure(client, (msg as any).cardId, (msg as any).tileId ?? String((msg as any).tileIdx ?? ""));
+          if (msg.type === "place_builder")
+            this.handlePlaceBuilder(client, (msg as any).tileId);
+          if (msg.type === "use_terraform")
+            this.handleTerraform(client, (msg as any).unitId);
+          if (msg.type === "end_turn")
+            this.handleEndTurn(client);
+          break;
+
+        case 'end':
+          // End phase is server-driven
+          break;
+
+        default:
+          console.warn(`[GameRoom] handleMessage: unmatched phase: ${currentPhaseStr} | raw: ${this.gs.currentPhase} | msg: ${msg.type}`);
+          break;
+      }
+    } catch(e) {
+      console.error('[GameRoom] handleMessage error:', e);
+      client.send('error', { code: 'SERVER_ERROR', message: String(e) });
     }
   }
 
@@ -167,54 +473,133 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   // ============================================================
 
   private handlePlaceTile(client: Client, tileId: string, tileType: string) {
-    const player = this.gs.players.get(client.sessionId)!;
+    try {
+      if (!tileId || typeof tileId !== 'string') {
+        console.error('[GameRoom] handlePlaceTile: invalid tileId', tileId);
+        client.send("error", { code: "BAD_REQUEST", message: "Invalid tile id." });
+        return;
+      }
+      const validTypes = ["neutral", "fire", "water"];
+      if (!validTypes.includes(tileType)) {
+        console.error('[GameRoom] handlePlaceTile: invalid tileType', tileType);
+        client.send("error", { code: "BAD_REQUEST", message: "Invalid tile type." });
+        return;
+      }
 
-    if (this.gs.tiles.has(tileId)) {
-      client.send("error", { message: "Tile already placed." });
-      return;
-    }
+      const player = this.gs.players.get(client.sessionId);
+      if (!player) { console.error('[GameRoom] handlePlaceTile: no player'); return; }
 
-    // Validate element counts
-    if (tileType === "neutral" && player.neutralTilesRemaining <= 0) {
-      client.send("error", { message: "No neutral tiles remaining." });
-      return;
-    }
-    if ((tileType === "fire" || tileType === "water") && player.elementalTilesRemaining <= 0) {
-      client.send("error", { message: "No elemental tiles remaining." });
-      return;
-    }
+      if (this.gs.tiles.has(tileId)) {
+        client.send("error", { code: "TILE_EXISTS", message: "Tile already placed." });
+        return;
+      }
 
-    const tile = new Tile();
-    tile.id = tileId;
-    tile.tileType = tileType;
-    tile.revealed = false;
-    tile.ownedBy = client.sessionId;
-    this.gs.tiles.set(tileId, tile);
+      const budget2 = (this as any)._tileBudgets?.get(client.sessionId) || { neutral: 99, elemental: 99 };
+      const neutralLeft   = ('neutralTilesRemaining'   in player) ? player.neutralTilesRemaining   : budget2.neutral;
+      const elementalLeft = ('elementalTilesRemaining' in player) ? player.elementalTilesRemaining : budget2.elemental;
 
-    if (tileType === "neutral") player.neutralTilesRemaining--;
-    else player.elementalTilesRemaining--;
+      if (tileType === "neutral" && neutralLeft <= 0) {
+        client.send("error", { code: "NO_TILES", message: "No neutral tiles remaining." });
+        return;
+      }
+      if ((tileType === "fire" || tileType === "water") && elementalLeft <= 0) {
+        client.send("error", { code: "NO_TILES", message: "No elemental tiles remaining." });
+        return;
+      }
 
-    addLog(this.gs, `${player.displayName} placed a tile at ${tileId}.`);
+      const tile = new Tile();
+      tile.id       = tileId;
+      tile.tileType = tileType;
+      tile.revealed = true;
+      tile.ownedBy  = client.sessionId;
+      this.gs.tiles.set(tileId, tile);
+
+      if ('neutralTilesRemaining' in player) {
+        if (tileType === "neutral") player.neutralTilesRemaining--;
+        else player.elementalTilesRemaining--;
+      } else {
+        const b = (this as any)._tileBudgets?.get(client.sessionId);
+        if (b) { if (tileType === "neutral") b.neutral--; else b.elemental--; }
+      }
+      const remainingNeutral   = ('neutralTilesRemaining'   in player) ? player.neutralTilesRemaining   : ((this as any)._tileBudgets?.get(client.sessionId)?.neutral   ?? 0);
+      const remainingElemental = ('elementalTilesRemaining' in player) ? player.elementalTilesRemaining : ((this as any)._tileBudgets?.get(client.sessionId)?.elemental ?? 0);
+
+      addLog(this.gs, `${player.displayName} placed ${tileType} tile at ${tileId}.`);
+
+      this.broadcast("tile_placed", {
+        tileId,
+        tileType,
+        byPlayer: this.getSeat(client.sessionId),
+        neutralRemaining:   remainingNeutral,
+        elementalRemaining: remainingElemental,
+      });
+    } catch(e) { console.error('[GameRoom] handlePlaceTile error:', e); }
   }
 
   private handleEndTilePlacement(client: Client) {
-    const player = this.gs.players.get(client.sessionId)!;
+    try {
+      // ── DEBUG: log full state so we can diagnose any future issue ──
+      const allPlayerIds = Array.from(this.gs.players.keys());
+      const allSeats     = allPlayerIds.map(id => `${id}=${this.getSeat(id)}`);
+      console.log(`[GameRoom] handleEndTilePlacement — sender: ${client.sessionId} (${this.getSeat(client.sessionId)}) | players: [${allSeats.join(', ')}] | clients: ${this.clients.length}`);
 
-    // Check pile minimums (simplified: just mark complete and pass turn)
-    player.tileSetupComplete = true;
-    addLog(this.gs, `${player.displayName} finished placing tiles.`);
+      const player = this.gs.players.get(client.sessionId);
+      if (!player) {
+        console.error('[GameRoom] handleEndTilePlacement: player not found for sessionId:', client.sessionId);
+        return;
+      }
 
-    // Switch to other player if they haven't placed yet
-    const otherPlayerId = this.getOtherPlayerId(client.sessionId);
-    const otherPlayer = this.gs.players.get(otherPlayerId);
+      player.tileSetupComplete = true;
+      addLog(this.gs, `${player.displayName} finished placing tiles.`);
 
-    if (!otherPlayer?.tileSetupComplete) {
-      this.gs.activePlayerId = otherPlayerId;
-      addLog(this.gs, `${this.getPlayerName(otherPlayerId)} now places their tiles.`);
-    } else {
-      // Both done — move to empire placement
-      this.gs.currentPhase = Phase.SETUP_EMPIRE;
-      addLog(this.gs, "Both players placed tiles. Now place your Empires.");
+      // ── Find the other player's sessionId ──
+      // Use seatMap directly so we never rely on gs.players ordering
+      const mySeat    = this.getSeat(client.sessionId);
+      const otherSeat = this.getOtherSeat(mySeat);
+      const otherPlayerId = this.getSessionBySeat(otherSeat);
+
+      console.log(`[GameRoom] handleEndTilePlacement — mySeat: ${mySeat} | otherSeat: ${otherSeat} | otherPlayerId: ${otherPlayerId}`);
+
+      if (!otherPlayerId) {
+        // Second player hasn't joined yet — just wait
+        console.warn('[GameRoom] handleEndTilePlacement: other player not in seatMap yet');
+        client.send("error", { code: "WAITING", message: "Waiting for opponent to join." });
+        return;
+      }
+
+      const otherPlayer = this.gs.players.get(otherPlayerId);
+
+      if (!otherPlayer?.tileSetupComplete) {
+        // Pass tile placement turn to the other player
+        this.gs.activePlayerId = otherPlayerId;
+        addLog(this.gs, `${this.getPlayerName(otherPlayerId)} now places their tiles.`);
+        console.log(`[GameRoom] handleEndTilePlacement — passing turn to ${otherSeat} (${otherPlayerId}) | verified: ${this.gs.activePlayerId}`);
+
+        // State FIRST so activePlayer is current, then phase_change
+        this.broadcastStateUpdate();
+        this.broadcastPhaseChange();
+
+        // Explicit turn_pass message so client can reliably flip isMyTurn
+        this.clients.forEach(c => {
+          const seat = this.getSeat(c.sessionId);
+          c.send("turn_pass", {
+            activePlayer: otherSeat,
+            phase: "setup_tiles",
+            isMyTurn: c.sessionId === otherPlayerId,
+          });
+        });
+      } else {
+        // Both done — move to empire placement
+        this.gs.currentPhase = String(Phase.SETUP_EMPIRE);
+        addLog(this.gs, "Both players placed tiles. Now place your Empires.");
+        console.log('[GameRoom] handleEndTilePlacement — both done, advancing to setup_empire');
+
+        // State FIRST, then phase_change
+        this.broadcastStateUpdate();
+        this.broadcastPhaseChange();
+      }
+    } catch(e) {
+      console.error('[GameRoom] handleEndTilePlacement error:', e);
     }
   }
 
@@ -228,68 +613,67 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
 
     const tile = this.gs.tiles.get(tileId);
     if (!tile) {
-      client.send("error", { message: "Tile does not exist." });
+      client.send("error", { code: "NO_TILE", message: "Tile does not exist — place it first." });
       return;
     }
 
-    // Empire must be placed in the back 3 rows of player's half
-    // (validation simplified — in full implementation, enforce row range per player)
+    player.empire.ownerId   = client.sessionId;
+    player.empire.tileId    = tileId;
+    player.empire.currentHp = (typeof EMPIRE_MAX_HP !== 'undefined') ? EMPIRE_MAX_HP : 20;
+    player.empire.isPlaced  = true;
+    player.empireSet        = true;
 
-    player.empire.ownerId = client.sessionId;
-    player.empire.tileId = tileId;
-    player.empire.currentHp = EMPIRE_MAX_HP;
-    player.empire.isPlaced = true;
-    player.empireSet = true;
-
-    tile.revealed = true;
+    tile.revealed   = true;
     tile.occupiedBy = `empire:${client.sessionId}`;
 
-    addLog(this.gs, `${player.displayName} placed their Empire at ${tileId}.`);
+    addLog(this.gs, `${player.displayName} placed Empire at ${tileId}.`);
+    console.log(`[GameRoom] handlePlaceEmpire — ${this.getSeat(client.sessionId)} placed empire at ${tileId}`);
 
-    // Check if both empires are placed
-    const allPlaced = (Array.from(this.gs.players.values()) as PlayerState[]).every((p: PlayerState) => p.empireSet);
+    const allPlaced = (Array.from(this.gs.players.values()) as PlayerState[]).every(p => p.empireSet);
     if (allPlaced) {
       this.startStandbyPhase();
+    } else {
+      this.broadcastStateUpdate();
     }
   }
 
   // ============================================================
-  // STANDBY PHASE
+  // STANDBY PHASE — server-driven
   // ============================================================
 
   private startStandbyPhase() {
-    this.gs.currentPhase = Phase.STANDBY;
+    this.gs.currentPhase = String(Phase.STANDBY);
     const playerId = this.gs.activePlayerId;
-    const player = this.gs.players.get(playerId)!;
+    const player   = this.gs.players.get(playerId)!;
 
-    // "At start of turn" effects would fire here
-
-    // Recalculate essence
     recalculateEssence(this.gs, playerId);
-    addLog(this.gs, `${player.displayName}'s Standby Phase. Essence: N${player.essence.neutral} F${player.essence.fire} W${player.essence.water}`);
 
-    // Clear per-turn unit flags and bonuses
+    // Reset unit flags for active player
     this.gs.units.forEach((unit: UnitInstance) => {
       if (unit.ownerId === playerId) {
-        unit.hasMovedThisTurn = false;
-        unit.hasAttackedThisTurn = false;
-        unit.speedBonusThisTurn = 0;
+        unit.hasMovedThisTurn     = false;
+        unit.hasAttackedThisTurn  = false;
+        unit.speedBonusThisTurn   = 0;
         unit.defenseBonusThisTurn = 0;
-        unit.meleeBonusThisTurn = 0;
+        unit.meleeBonusThisTurn   = 0;
         unit.cannotBeRangedTargeted = false;
-
-        // Remove development rest after first turn
-        if (unit.hasDevelopmentRest) {
-          unit.hasDevelopmentRest = false;
-        }
+        if (unit.hasDevelopmentRest) unit.hasDevelopmentRest = false;
       }
     });
 
-    // First 2 rounds: no dev rest for units spawned near empire
-    // (handled at spawn time via roundNumber check)
+    addLog(this.gs, `${player.displayName}'s Standby. Essence: N${player.essence?.neutral ?? 0} F${player.essence?.fire ?? 0} W${player.essence?.water ?? 0}`);
+    console.log(`[GameRoom] startStandbyPhase — activePlayer: ${this.getActiveSeat()}`);
 
-    this.gs.currentPhase = Phase.DRAW;
-    addLog(this.gs, `${player.displayName}'s Draw Phase.`);
+    this.broadcastPhaseChange();
+    this.broadcastStateUpdate();
+
+    // Auto-advance to draw after 1.5s
+    this.clock.setTimeout(() => {
+      this.gs.currentPhase = String(Phase.DRAW);
+      addLog(this.gs, `${player.displayName}'s Draw Phase.`);
+      this.broadcastPhaseChange();
+      this.broadcastStateUpdate();
+    }, 1500);
   }
 
   // ============================================================
@@ -299,24 +683,35 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   private handleDrawCard(client: Client, deck: "unit" | "blitz") {
     const player = this.gs.players.get(client.sessionId)!;
 
+    let drawn: string | null = null;
+    let remaining = 0;
+
     if (deck === "unit") {
-      const drawn = drawCard(player.unitDeck, player.hand);
-      if (!drawn) {
-        client.send("error", { message: "Unit deck is empty." });
-        return;
-      }
-      addLog(this.gs, `${player.displayName} drew a unit card.`);
+      drawn = drawCard(player.unitDeck, player.hand);
+      remaining = player.unitDeck.length;
     } else {
-      const drawn = drawCard(player.blitzDeck, player.hand);
-      if (!drawn) {
-        client.send("error", { message: "Blitz deck is empty." });
-        return;
-      }
-      addLog(this.gs, `${player.displayName} drew a blitz card.`);
+      drawn = drawCard(player.blitzDeck, player.hand);
+      remaining = player.blitzDeck.length;
     }
 
-    this.gs.currentPhase = Phase.MAIN;
+    if (!drawn) {
+      client.send("error", { code: "DECK_EMPTY", message: `${deck} deck is empty.` });
+      return;
+    }
+
+    addLog(this.gs, `${player.displayName} drew from ${deck} deck.`);
+
+    const cardDef = CARD_DEFINITIONS[drawn];
+    client.send("draw_result", {
+      card:     { id: drawn, ...(cardDef ?? { name: drawn, type: "unit" }) },
+      deckType: deck,
+      remaining,
+    });
+
+    this.gs.currentPhase = String(Phase.MAIN);
     addLog(this.gs, `${player.displayName}'s Main Phase.`);
+    this.broadcastPhaseChange();
+    this.broadcastStateUpdate();
   }
 
   // ============================================================
@@ -326,41 +721,31 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   private handleMoveUnit(client: Client, unitId: string, targetTileId: string) {
     const unit = this.gs.units.get(unitId);
     if (!unit || unit.ownerId !== client.sessionId) return;
-    if (unit.hasDevelopmentRest) {
-      client.send("error", { message: "Unit is in Development Rest." });
-      return;
-    }
-    if (unit.hasAttackedThisTurn) {
-      client.send("error", { message: "Unit has already attacked this turn and cannot move." });
-      return;
-    }
+    if (unit.hasDevelopmentRest)   { client.send("error", { code: "DEV_REST",      message: "Unit is in Development Rest." }); return; }
+    if (unit.hasAttackedThisTurn)  { client.send("error", { code: "ALREADY_ACTED", message: "Unit already attacked this turn." }); return; }
 
     const validTiles = getValidMoveTiles(this.gs, unit);
     if (!validTiles.includes(targetTileId)) {
-      client.send("error", { message: "Invalid move target." });
+      client.send("error", { code: "INVALID_MOVE", message: "Invalid move target." });
       return;
     }
 
-    // Vacate old tile
     const oldTile = this.gs.tiles.get(unit.tileId);
     if (oldTile && oldTile.occupiedBy === unitId) oldTile.occupiedBy = "";
 
-    // Move to new tile
-    unit.tileId = targetTileId;
+    unit.tileId           = targetTileId;
     unit.hasMovedThisTurn = true;
 
     const newTile = this.gs.tiles.get(targetTileId);
-    if (newTile) {
-      newTile.occupiedBy = unitId;
-      newTile.revealed = true; // Fog of war reveal
-    }
+    if (newTile) { newTile.occupiedBy = unitId; newTile.revealed = true; }
 
     addLog(this.gs, `${this.getPlayerName(client.sessionId)} moved unit to ${targetTileId}.`);
     this.checkStructureCapture(unitId);
+    this.broadcastStateUpdate();
   }
 
   // ============================================================
-  // MAIN PHASE: MELEE ATTACK
+  // MAIN PHASE: ATTACKS
   // ============================================================
 
   private handleMeleeAttack(client: Client, attackerUnitId: string, targetId: string) {
@@ -368,73 +753,77 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     if (!attacker || attacker.ownerId !== client.sessionId) return;
     if (attacker.hasDevelopmentRest || attacker.hasAttackedThisTurn) return;
 
-    const validTargets = getValidMeleeTargets(this.gs, attacker);
-    if (!validTargets.includes(targetId)) {
-      client.send("error", { message: "No valid melee target." });
+    if (!getValidMeleeTargets(this.gs, attacker).includes(targetId)) {
+      client.send("error", { code: "INVALID_TARGET", message: "No valid melee target." });
       return;
     }
 
     attacker.hasAttackedThisTurn = true;
     this.resolveAttackOnTarget(attacker, targetId, "melee", client.sessionId);
+    this.broadcastStateUpdate();
   }
-
-  // ============================================================
-  // MAIN PHASE: RANGED ATTACK
-  // ============================================================
 
   private handleRangedAttack(client: Client, attackerUnitId: string, targetId: string) {
     const attacker = this.gs.units.get(attackerUnitId);
     if (!attacker || attacker.ownerId !== client.sessionId) return;
     if (attacker.hasDevelopmentRest || attacker.hasAttackedThisTurn) return;
 
-    const validTargets = getValidRangedTargets(this.gs, attacker);
-    if (!validTargets.includes(targetId)) {
-      client.send("error", { message: "No valid ranged target." });
+    if (!getValidRangedTargets(this.gs, attacker).includes(targetId)) {
+      client.send("error", { code: "INVALID_TARGET", message: "No valid ranged target." });
       return;
     }
 
     attacker.hasAttackedThisTurn = true;
     this.resolveAttackOnTarget(attacker, targetId, "ranged", client.sessionId);
+    this.broadcastStateUpdate();
   }
 
-  private resolveAttackOnTarget(
-    attacker: UnitInstance,
-    targetId: string,
-    attackType: "melee" | "ranged",
-    attackerPlayerId: string
-  ) {
-    const isEmpireTarget = targetId.startsWith("empire:");
-    const targetUnit = this.gs.units.get(targetId);
-    const targetStructure = this.gs.structures.get(targetId);
+  private handleDeclareAttack(client: Client, unitId: string, targetTile: string, mode: "melee" | "ranged") {
+    if (mode === "melee") this.handleMeleeAttack(client, unitId, targetTile);
+    else                  this.handleRangedAttack(client, unitId, targetTile);
+  }
 
+  private resolveAttackOnTarget(attacker: UnitInstance, targetId: string, attackType: "melee" | "ranged", attackerPlayerId: string) {
+    const isEmpireTarget  = targetId.startsWith("empire:");
+    const targetUnit      = this.gs.units.get(targetId);
+    const targetStructure = this.gs.structures.get(targetId);
     const isStructureOrEmpire = isEmpireTarget || !!targetStructure;
+
     const result = resolveAttack(attacker, targetUnit ?? null, isStructureOrEmpire, attackType);
+
+    const combatPayload: any = {
+      attackerId: attacker.instanceId,
+      targetId,
+      roll:   result.roll,
+      def:    result.def ?? 0,
+      hit:    result.hit,
+      damage: result.damage,
+      died:   false,
+      isEmpireTarget,
+    };
 
     if (isEmpireTarget) {
       const empireOwnerId = targetId.replace("empire:", "");
-      const empireOwner = this.gs.players.get(empireOwnerId);
+      const empireOwner   = this.gs.players.get(empireOwnerId);
       if (empireOwner) {
         empireOwner.empire.currentHp -= result.damage;
         addLog(this.gs, `Attack on Empire! Roll: ${result.roll}. Damage: ${result.damage}. Empire HP: ${empireOwner.empire.currentHp}`);
       }
     } else if (targetStructure) {
       targetStructure.currentHp -= result.damage;
-      addLog(this.gs, `Attack on Structure! Damage: ${result.damage}. Structure HP: ${targetStructure.currentHp}`);
-      if (targetStructure.currentHp <= 0) {
-        this.destroyStructure(targetStructure.instanceId);
-      }
+      if (targetStructure.currentHp <= 0) this.destroyStructure(targetStructure.instanceId);
     } else if (targetUnit) {
       if (result.hit) {
         targetUnit.currentHp -= result.damage;
-        addLog(this.gs, `${attackType} attack! Roll: ${result.roll} vs Defense. Damage: ${result.damage}. Target HP: ${targetUnit.currentHp}`);
         if (targetUnit.currentHp <= 0) {
+          combatPayload.died = true;
+          combatPayload.essenceGained = 1;
           this.killUnit(targetUnit.instanceId, attackerPlayerId);
         }
-      } else {
-        addLog(this.gs, `${attackType} attack missed! Roll: ${result.roll} vs Defense.`);
       }
     }
 
+    this.broadcast("combat_result", combatPayload);
     this.checkAndApplyWinCondition();
   }
 
@@ -443,40 +832,34 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   // ============================================================
 
   private handlePlayUnit(client: Client, cardId: string, spawnTileId: string) {
-    const player = this.gs.players.get(client.sessionId)!;
+    const player  = this.gs.players.get(client.sessionId)!;
     const cardDef = CARD_DEFINITIONS[cardId] as UnitCardDef;
     if (!cardDef || cardDef.type !== CardType.UNIT) return;
 
-    // Check hand
     const handIdx = player.hand.indexOf(cardId);
-    if (handIdx === -1) {
-      client.send("error", { message: "Card not in hand." });
-      return;
-    }
+    if (handIdx === -1) { client.send("error", { code: "NOT_IN_HAND", message: "Card not in hand." }); return; }
 
-    // Check essence
     if (!canAfford(player.essence, cardDef.essenceCost, cardDef.element)) {
-      client.send("error", { message: "Not enough Essence." });
+      client.send("error", { code: "NO_ESSENCE", message: "Not enough Essence." });
       return;
     }
 
-    // Check spawn tile validity (must be near Empire or owned Structure)
     if (!this.isValidSpawnTile(client.sessionId, spawnTileId)) {
-      client.send("error", { message: "Invalid spawn location." });
+      client.send("error", { code: "INVALID_SPAWN", message: "Invalid spawn location." });
       return;
     }
 
-    // Spend essence, remove from hand, create unit
     spendEssence(player.essence, cardDef.essenceCost, cardDef.element);
     player.hand.splice(handIdx, 1);
 
     const unit = new UnitInstance();
-    unit.instanceId = this.nextId();
-    unit.cardId = cardId;
-    unit.ownerId = client.sessionId;
-    unit.tileId = spawnTileId;
-    unit.currentHp = cardDef.hp;
-    unit.hasDevelopmentRest = this.gs.roundNumber > FIRST_PLAYER_NO_DEV_REST_ROUNDS;
+    unit.instanceId    = this.nextId();
+    unit.cardId        = cardId;
+    unit.ownerId       = client.sessionId;
+    unit.tileId        = spawnTileId;
+    unit.currentHp     = cardDef.hp;
+    const noRestRounds = (typeof FIRST_PLAYER_NO_DEV_REST_ROUNDS !== 'undefined') ? FIRST_PLAYER_NO_DEV_REST_ROUNDS : 2;
+    unit.hasDevelopmentRest = this.gs.roundNumber > noRestRounds;
 
     this.gs.units.set(unit.instanceId, unit);
 
@@ -484,6 +867,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     if (tile) { tile.occupiedBy = unit.instanceId; tile.revealed = true; }
 
     addLog(this.gs, `${player.displayName} played ${cardDef.name} at ${spawnTileId}.`);
+    this.broadcastStateUpdate();
   }
 
   // ============================================================
@@ -491,7 +875,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   // ============================================================
 
   private handlePlayBlitz(client: Client, cardId: string, targetId?: string) {
-    const player = this.gs.players.get(client.sessionId)!;
+    const player  = this.gs.players.get(client.sessionId)!;
     const cardDef = CARD_DEFINITIONS[cardId] as BlitzCardDef;
     if (!cardDef || cardDef.type !== CardType.BLITZ) return;
 
@@ -499,7 +883,7 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     if (handIdx === -1) return;
 
     if (!canAfford(player.essence, cardDef.essenceCost, cardDef.element)) {
-      client.send("error", { message: "Not enough Essence." });
+      client.send("error", { code: "NO_ESSENCE", message: "Not enough Essence." });
       return;
     }
 
@@ -509,19 +893,24 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
 
     addLog(this.gs, `${player.displayName} played Blitz: ${cardDef.name}.`);
 
-    // Open reaction window for opponent if this is a Slow or Instant card
-    const otherId = this.getOtherPlayerId(client.sessionId);
-    this.gs.pendingBlitzCardId = cardId;
-    this.gs.reactionFromPlayerId = otherId;
-    this.gs.awaitingReaction = true;
+    this.broadcast("blitz_played", {
+      cardId,
+      playedBy: this.getSeat(client.sessionId),
+      targetId,
+      blitzSpeed: "instant",
+    });
 
-    // Apply effect after reaction window (or immediately for Instant if no reaction)
-    // For prototype, apply immediately then check if opponent reacts
+    const otherId = this.getOtherPlayerId(client.sessionId);
+    this.gs.pendingBlitzCardId   = cardId;
+    this.gs.reactionFromPlayerId = otherId;
+    this.gs.awaitingReaction     = true;
+
     this.applyBlitzEffect(cardDef, targetId, client.sessionId);
+    this.broadcastStateUpdate();
   }
 
   private handleReactBlitz(client: Client, reactionCardId: string) {
-    const player = this.gs.players.get(client.sessionId)!;
+    const player  = this.gs.players.get(client.sessionId)!;
     const cardDef = CARD_DEFINITIONS[reactionCardId] as BlitzCardDef;
     if (!cardDef || cardDef.type !== CardType.BLITZ) return;
 
@@ -537,67 +926,32 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     addLog(this.gs, `${player.displayName} reacted with: ${cardDef.name}.`);
     this.applyBlitzEffect(cardDef, undefined, client.sessionId);
     this.resolveReactionWindow();
+    this.broadcastStateUpdate();
   }
 
   private resolveReactionWindow() {
-    this.gs.awaitingReaction = false;
-    this.gs.pendingBlitzCardId = "";
+    this.gs.awaitingReaction     = false;
+    this.gs.pendingBlitzCardId   = "";
     this.gs.reactionFromPlayerId = "";
   }
 
   private applyBlitzEffect(cardDef: BlitzCardDef, targetId: string | undefined, casterId: string) {
     switch (cardDef.id) {
-
-      case "B001": // Heat Seeking: next attack from selected unit bypasses defense
+      case "B001":
+        if (targetId) { const u = this.gs.units.get(targetId); if (u && u.ownerId === casterId) u.defenseBonusThisTurn -= 99; }
+        break;
+      case "B002":
+        if (targetId) { const u = this.gs.units.get(targetId); if (u && u.ownerId === casterId) u.meleeBonusThisTurn += 2; }
+        break;
+      case "B003":
+        if (targetId) { const u = this.gs.units.get(targetId); if (u && u.ownerId === casterId) u.speedBonusThisTurn += 2; }
+        break;
+      case "B006":
         if (targetId) {
-          const unit = this.gs.units.get(targetId);
-          if (unit && unit.ownerId === casterId) {
-            unit.defenseBonusThisTurn -= 99; // Effectively makes defense 0 or below
-            addLog(this.gs, `Heat Seeking: ${CARD_DEFINITIONS[unit.cardId]?.name ?? "unit"}'s next attack ignores defense.`);
-          }
-        }
-        break;
-
-      case "B002": // Rage: selected ally unit +2 attack this turn
-        if (targetId) {
-          const unit = this.gs.units.get(targetId);
-          if (unit && unit.ownerId === casterId) {
-            unit.meleeBonusThisTurn += 2;
-            addLog(this.gs, `Rage: unit gains +2 attack this turn.`);
-          }
-        }
-        break;
-
-      case "B003": // Swift Winds: ally unit +2 speed this turn
-        if (targetId) {
-          const unit = this.gs.units.get(targetId);
-          if (unit && unit.ownerId === casterId) {
-            unit.speedBonusThisTurn += 2;
-            addLog(this.gs, `Swift Winds: unit gains +2 speed this turn.`);
-          }
-        }
-        break;
-
-      case "B004": // Lightning Strikes Twice: flag next blitz to trigger twice
-        // Store flag on player — GameRoom checks this on next blitz play
-        const lsPlayer = this.gs.players.get(casterId)!;
-        (lsPlayer as any)._lightningActive = true;
-        addLog(this.gs, `Lightning Strikes Twice: next Blitz card triggers twice.`);
-        break;
-
-      case "B005": // Grounded: reaction — negate opponent blitz (handled in react flow)
-        addLog(this.gs, `Grounded negated the opposing Blitz card.`);
-        // The pending blitz effect is already applied before reaction in prototype;
-        // In full impl, defer effect application until reaction window closes.
-        break;
-
-      case "B006": // Hand of Protection: double a unit's defense this attack
-        if (targetId) {
-          const unit = this.gs.units.get(targetId);
-          if (unit && unit.ownerId === casterId) {
-            const baseDef = (CARD_DEFINITIONS[unit.cardId] as UnitCardDef)?.defense ?? 0;
-            unit.defenseBonusThisTurn += baseDef; // Adds base again = doubled
-            addLog(this.gs, `Hand of Protection: unit defense doubled.`);
+          const u = this.gs.units.get(targetId);
+          if (u && u.ownerId === casterId) {
+            const baseDef = (CARD_DEFINITIONS[u.cardId] as UnitCardDef)?.defense ?? 0;
+            u.defenseBonusThisTurn += baseDef;
           }
         }
         break;
@@ -609,63 +963,83 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   // ============================================================
 
   private handlePlayStructure(client: Client, cardId: string, tileId: string) {
-    const player = this.gs.players.get(client.sessionId)!;
+    const player  = this.gs.players.get(client.sessionId)!;
     const cardDef = CARD_DEFINITIONS[cardId] as StructureCardDef;
     if (!cardDef || cardDef.type !== CardType.STRUCTURE) return;
 
     const extraIdx = player.extraDeck.indexOf(cardId);
-    if (extraIdx === -1) return;
+    if (extraIdx === -1) { client.send("error", { code: "NOT_IN_DECK", message: "Structure not in extra deck." }); return; }
 
     if (!canAfford(player.essence, cardDef.essenceCost, cardDef.element)) {
-      client.send("error", { message: "Not enough Essence." });
+      client.send("error", { code: "NO_ESSENCE", message: "Not enough Essence." });
       return;
     }
 
     const tile = this.gs.tiles.get(tileId);
-    if (!tile || tile.occupiedBy) {
-      client.send("error", { message: "Tile is occupied or does not exist." });
-      return;
-    }
+    if (!tile || tile.occupiedBy) { client.send("error", { code: "TILE_BLOCKED", message: "Tile occupied or missing." }); return; }
 
     spendEssence(player.essence, cardDef.essenceCost, cardDef.element);
     player.extraDeck.splice(extraIdx, 1);
 
-    const structure = new StructureInstance();
+    const structure      = new StructureInstance();
     structure.instanceId = this.nextId();
-    structure.cardId = cardId;
-    structure.ownerId = client.sessionId;
-    structure.tileId = tileId;
-    structure.currentHp = STRUCTURE_MAX_HP;
+    structure.cardId     = cardId;
+    structure.ownerId    = client.sessionId;
+    structure.tileId     = tileId;
+    structure.currentHp  = (typeof STRUCTURE_MAX_HP !== 'undefined') ? STRUCTURE_MAX_HP : 10;
 
     this.gs.structures.set(structure.instanceId, structure);
     tile.occupiedBy = structure.instanceId;
-    tile.revealed = true;
+    tile.revealed   = true;
 
     addLog(this.gs, `${player.displayName} built ${cardDef.name} at ${tileId}.`);
+    this.broadcastStateUpdate();
   }
 
   // ============================================================
-  // MAIN PHASE: PLACE BUILDER
+  // MAIN PHASE: BUILDER
   // ============================================================
 
   private handlePlaceBuilder(client: Client, tileId: string) {
     const player = this.gs.players.get(client.sessionId)!;
-    const tile = this.gs.tiles.get(tileId);
+    const tile   = this.gs.tiles.get(tileId);
 
-    if (!tile) { client.send("error", { message: "Tile not found." }); return; }
-    if (tile.tileType === "neutral") { client.send("error", { message: "Builders must be on elemental tiles." }); return; }
-    if (tile.occupiedBy) { client.send("error", { message: "Tile is occupied." }); return; }
+    if (!tile)                       { client.send("error", { code: "NO_TILE",    message: "Tile not found." }); return; }
+    if (tile.tileType === "neutral") { client.send("error", { code: "WRONG_TILE", message: "Builders must be on elemental tiles." }); return; }
+    if (tile.occupiedBy)             { client.send("error", { code: "OCCUPIED",   message: "Tile is occupied." }); return; }
 
-    const builder = new BuilderInstance();
+    const builder      = new BuilderInstance();
     builder.instanceId = this.nextId();
-    builder.ownerId = client.sessionId;
-    builder.tileId = tileId;
+    builder.ownerId    = client.sessionId;
+    builder.tileId     = tileId;
 
     this.gs.builders.set(builder.instanceId, builder);
     tile.occupiedBy = builder.instanceId;
-    tile.revealed = true;
+    tile.revealed   = true;
 
     addLog(this.gs, `${player.displayName} placed a Builder at ${tileId}.`);
+    this.broadcastStateUpdate();
+  }
+
+  // ============================================================
+  // TERRAFORM
+  // ============================================================
+
+  private handleTerraform(client: Client, unitId: string) {
+    const unit = this.gs.units.get(unitId);
+    if (!unit || unit.ownerId !== client.sessionId) return;
+    if (unit.cardId !== "U009") { client.send("error", { code: "WRONG_UNIT", message: "Only Large Fish can Terraform." }); return; }
+    if ((unit as any)._terraformUsed) { client.send("error", { code: "USED", message: "Terraform already used." }); return; }
+
+    const tile = this.gs.tiles.get(unit.tileId);
+    if (!tile || tile.tileType === "neutral") { client.send("error", { code: "WRONG_TILE", message: "Terraform requires elemental tile." }); return; }
+
+    tile.revealed = true;
+    (unit as any)._terraformUsed = true;
+    tile.tileType = "neutral";
+
+    addLog(this.gs, `Terraform — converted tile at ${unit.tileId} to neutral.`);
+    this.broadcastStateUpdate();
   }
 
   // ============================================================
@@ -673,25 +1047,48 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   // ============================================================
 
   private handleEndTurn(client: Client) {
-    this.gs.currentPhase = Phase.END;
-    addLog(this.gs, `${this.getPlayerName(client.sessionId)} ends their turn.`);
+    addLog(this.gs, `${this.getPlayerName(client.sessionId)} ends turn.`);
+    this.gs.currentPhase = String(Phase.END);
+    this.broadcastPhaseChange();
 
-    // "End of turn" effects fire here (placeholder)
-
-    // Advance round counter if both players have gone
+    // Advance round counter when p2 ends their turn
     const playerIds = Array.from(this.gs.players.keys());
-    if (this.gs.activePlayerId === playerIds[1]) {
-      this.gs.roundNumber++;
-    }
+    if (this.gs.activePlayerId === playerIds[1]) this.gs.roundNumber++;
 
     // Pass to other player
     this.gs.activePlayerId = this.getOtherPlayerId(client.sessionId);
     addLog(this.gs, `${this.getPlayerName(this.gs.activePlayerId)}'s turn begins.`);
-    this.startStandbyPhase();
+
+    this.clock.setTimeout(() => this.startStandbyPhase(), 800);
   }
 
   // ============================================================
-  // VALID MOVE / TARGET INFO RESPONSES
+  // CONCEDE
+  // ============================================================
+
+  private handleConcede(client: Client) {
+    const winner = this.getOtherSeat(this.getSeat(client.sessionId));
+    this.broadcast("game_over", { winner, reason: "forfeit" });
+    addLog(this.gs, `${this.getPlayerName(client.sessionId)} conceded.`);
+    this.clock.setTimeout(() => this.disconnect(), 2000);
+  }
+
+  // ============================================================
+  // WIN CONDITIONS
+  // ============================================================
+
+  private checkAndApplyWinCondition() {
+    const result = checkWinConditions(this.gs);
+    if (!result) return;
+
+    const winnerSeat = this.getSeat((result as any).winnerId ?? "");
+    this.broadcast("game_over", { winner: winnerSeat, reason: result.reason });
+    addLog(this.gs, `GAME OVER — ${this.getPlayerName((result as any).winnerId ?? "")} wins: ${result.reason}`);
+    this.clock.setTimeout(() => this.disconnect(), 3000);
+  }
+
+  // ============================================================
+  // VALID MOVE / TARGET RESPONSES
   // ============================================================
 
   private sendValidMoves(client: Client, unitId: string) {
@@ -707,51 +1104,14 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     const targets = attackType === "melee"
       ? getValidMeleeTargets(this.gs, unit)
       : getValidRangedTargets(this.gs, unit);
-    client.send("valid_targets", { unitId, attackType, targets });
+    client.send("valid_targets", { unitId, tiles: targets, mode: attackType });
   }
 
   // ============================================================
-  // MAIN PHASE: TERRAFORM (Large Fish ability)
+  // HELPERS
   // ============================================================
 
-  private handleTerraform(client: Client, unitId: string) {
-    const unit = this.gs.units.get(unitId);
-    if (!unit || unit.ownerId !== client.sessionId) return;
-    if (unit.cardId !== "U009") {
-      client.send("error", { message: "Only Large Fish can use Terraform." });
-      return;
-    }
-
-    // Check terraform hasn't been used already (stored as a flag on the instance)
-    if ((unit as any)._terraformUsed) {
-      client.send("error", { message: "Terraform has already been used by this unit." });
-      return;
-    }
-
-    const tile = this.gs.tiles.get(unit.tileId);
-    if (!tile) return;
-
-    if (tile.tileType === "neutral") {
-      client.send("error", { message: "Terraform requires an elemental tile." });
-      return;
-    }
-
-    // Reveal the unit (fog of war — unit is now visible)
-    tile.revealed = true;
-    (unit as any)._terraformUsed = true;
-
-    // Convert tile to neutral
-    const oldType = tile.tileType;
-    tile.tileType = "neutral";
-
-    addLog(this.gs, `Large Fish used Terraform — converted ${oldType} tile at ${unit.tileId} to neutral. Unit is now revealed.`);
-  }
-
-  // ============================================================
-
-  private nextId(): string {
-    return `inst_${++this.instanceCounter}`;
-  }
+  private nextId(): string { return `inst_${++this.instanceCounter}`; }
 
   private getOtherPlayerId(sessionId: string): string {
     const ids = Array.from(this.gs.players.keys()) as string[];
@@ -766,67 +1126,48 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
     const player = this.gs.players.get(playerId);
     if (!player) return false;
 
-    // Can spawn adjacent to Empire
     if (player.empire.isPlaced) {
-      const empireNeighbors = [player.empire.tileId, ...this.getNeighborIds(player.empire.tileId)];
-      if (empireNeighbors.includes(tileId)) return true;
+      if ([player.empire.tileId, ...this.getNeighborIds(player.empire.tileId)].includes(tileId)) return true;
     }
 
-    // Can spawn adjacent to owned structures
     let valid = false;
     this.gs.structures.forEach((s: StructureInstance) => {
-      if (s.ownerId === playerId) {
-        const structureNeighbors = [s.tileId, ...this.getNeighborIds(s.tileId)];
-        if (structureNeighbors.includes(tileId)) valid = true;
-      }
+      if (s.ownerId === playerId && [s.tileId, ...this.getNeighborIds(s.tileId)].includes(tileId)) valid = true;
     });
-
     return valid;
   }
 
   private getNeighborIds(tileId: string): string[] {
-    const { row, col } = { row: parseInt(tileId.split("c")[0].replace("r", "")), col: parseInt(tileId.split("c")[1]) };
+    const row   = parseInt(tileId.split("c")[0].replace("r", ""));
+    const col   = parseInt(tileId.split("c")[1]);
     const isOdd = row % 2 !== 0;
-    const offsets = isOdd
+    const offs  = isOdd
       ? [[-1,0],[-1,1],[0,-1],[0,1],[1,0],[1,1]]
       : [[-1,-1],[-1,0],[0,-1],[0,1],[1,-1],[1,0]];
-    return offsets.map(([dr, dc]) => `r${row+dr!}c${col+dc!}`);
+    return offs.map(([dr, dc]) => `r${row+dr!}c${col+dc!}`);
   }
 
   private checkStructureCapture(unitId: string) {
     const unit = this.gs.units.get(unitId);
     if (!unit) return;
 
-    this.gs.structures.forEach((structure: StructureInstance) => {
-      if (structure.ownerId === unit.ownerId) return;
+    this.gs.structures.forEach((s: StructureInstance) => {
+      if (s.ownerId === unit.ownerId) return;
+      const neighbors = this.getNeighborIds(s.tileId);
+      const enemies   = (Array.from(this.gs.units.values()) as UnitInstance[]).filter(u => u.ownerId === unit.ownerId && neighbors.includes(u.tileId));
+      const defenders = (Array.from(this.gs.units.values()) as UnitInstance[]).filter(u => u.ownerId === s.ownerId  && neighbors.includes(u.tileId));
 
-      const neighbors = this.getNeighborIds(structure.tileId);
-      const nearbyEnemies = (Array.from(this.gs.units.values()) as UnitInstance[]).filter(
-        (u: UnitInstance) => u.ownerId === unit.ownerId && neighbors.includes(u.tileId)
-      );
+      if (defenders.length > 0) { s.captureProgress = 0; return; }
+      s.captureProgress += enemies.length >= 2 ? 2 : enemies.length;
 
-      const nearbyOwnerUnits = (Array.from(this.gs.units.values()) as UnitInstance[]).filter(
-        (u: UnitInstance) => u.ownerId === structure.ownerId && neighbors.includes(u.tileId)
-      );
-
-      if (nearbyOwnerUnits.length > 0) {
-        // Contested — reset capture
-        structure.captureProgress = 0;
-        return;
-      }
-
-      if (nearbyEnemies.length >= 2) {
-        structure.captureProgress += 2; // Counts as 1 turn worth
-      } else if (nearbyEnemies.length === 1) {
-        structure.captureProgress += 1;
-      }
-
-      if (structure.captureProgress >= 2) {
-        // Capture!
-        const oldOwnerName = this.getPlayerName(structure.ownerId);
-        structure.ownerId = unit.ownerId;
-        structure.captureProgress = 0;
-        addLog(this.gs, `${this.getPlayerName(unit.ownerId)} captured ${CARD_DEFINITIONS[structure.cardId]?.name ?? "Structure"} from ${oldOwnerName}!`);
+      if (s.captureProgress >= 2) {
+        const from = this.getPlayerName(s.ownerId);
+        s.ownerId         = unit.ownerId;
+        s.captureProgress = 0;
+        this.broadcast("capture_update", { structureTile: s.tileId, capturedBy: this.getSeat(unit.ownerId), progress: 1 });
+        addLog(this.gs, `${this.getPlayerName(unit.ownerId)} captured Structure from ${from}!`);
+      } else {
+        this.broadcast("capture_update", { structureTile: s.tileId, capturedBy: this.getSeat(unit.ownerId), progress: s.captureProgress / 2 });
       }
     });
   }
@@ -834,34 +1175,18 @@ export class GameRoom extends Room<{ state: GameRoomState }> {
   private killUnit(instanceId: string, killerPlayerId: string) {
     const unit = this.gs.units.get(instanceId);
     if (!unit) return;
-
-    const killer = this.gs.players.get(killerPlayerId)!;
-    addEssence(killer.essence, 1, "neutral" as Element);
-    addLog(this.gs, `Unit destroyed! ${killer.displayName} gains 1 Neutral Essence.`);
-
     const tile = this.gs.tiles.get(unit.tileId);
     if (tile && tile.occupiedBy === instanceId) tile.occupiedBy = "";
-
     this.gs.units.delete(instanceId);
+    addLog(this.gs, `Unit ${instanceId} destroyed by ${this.getPlayerName(killerPlayerId)}.`);
   }
 
   private destroyStructure(instanceId: string) {
-    const structure = this.gs.structures.get(instanceId);
-    if (!structure) return;
-
-    const tile = this.gs.tiles.get(structure.tileId);
+    const s = this.gs.structures.get(instanceId);
+    if (!s) return;
+    const tile = this.gs.tiles.get(s.tileId);
     if (tile && tile.occupiedBy === instanceId) tile.occupiedBy = "";
-
-    addLog(this.gs, `Structure destroyed at ${structure.tileId}!`);
     this.gs.structures.delete(instanceId);
-  }
-
-  private checkAndApplyWinCondition() {
-    const result = checkWinConditions(this.gs);
-    if (result !== GameResult.ONGOING) {
-      this.gs.gameResult = result;
-      addLog(this.gs, `Game Over! Winner: ${this.getPlayerName(this.gs.winnerId)}`);
-      this.disconnect();
-    }
+    addLog(this.gs, `Structure ${instanceId} destroyed.`);
   }
 }
