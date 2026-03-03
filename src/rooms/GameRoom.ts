@@ -54,7 +54,7 @@ type Msg =
   | { type: "ability_use";         unitId: string; abilityIndex: number; targetId?: string; targetTile?: number; essenceCost: any }
   | { type: "concede" };
 
-export class GameRoom extends Room<GameRoomState> {
+export class GameRoom extends Room<any> {
 
   private instanceCounter = 0;
   // Map sessionId → seat label ("p1" | "p2")
