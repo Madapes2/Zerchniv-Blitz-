@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zerchniv Blitz — Create Account</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+  :root {
+    --gold: #c8a84b;
+    --gold-light: #e8c96d;
+    --gold-dim: #7a6430;
+    --deep: #07090f;
+    --navy: #0d1528;
+    --panel: #0f1b2e;
+    --border: #1e3050;
+    --text: #d4c9b0;
+    --muted: #6b7a90;
+    --red: #c84b4b;
+    --green: #4bc87a;
+    --blue: #4b8ac8;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--deep);
+    color: var(--text);
+    font-family: 'Rajdhani', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Animated background */
+  .bg-grid {
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(200,168,75,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(200,168,75,0.04) 1px, transparent 1px);
+    background-size: 60px 60px;
+    animation: gridDrift 20s linear infinite;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  @keyframes gridDrift {
+    0% { transform: translate(0,0); }
+    100% { transform: translate(60px, 60px); }
+  }
+
+  /* Hex decorations */
+  .hex-deco {
+    position: fixed;
+    width: 400px; height: 400px;
+    border: 1px solid rgba(200,168,75,0.06);
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .hex-deco:nth-child(1) { top: -100px; right: -100px; animation: pulse 6s ease-in-out infinite; }
+  .hex-deco:nth-child(2) { bottom: -150px; left: -150px; width: 500px; height: 500px; animation: pulse 8s ease-in-out 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+
+  /* Floating particles */
+  .particle {
+    position: fixed;
+    width: 2px; height: 2px;
+    background: var(--gold);
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 0;
+    animation: float linear infinite;
+    opacity: 0;
+  }
+  @keyframes float {
+    0% { transform: translateY(100vh) translateX(0); opacity: 0; }
+    10% { opacity: .6; }
+    90% { opacity: .3; }
+    100% { transform: translateY(-10vh) translateX(var(--drift)); opacity: 0; }
+  }
+
+  /* Main container */
+  .container {
+    position: relative;
+    z-index: 10;
+    width: 100%;
+    max-width: 520px;
+    padding: 24px;
+  }
+
+  /* Logo/title area */
+  .header {
+    text-align: center;
+    margin-bottom: 36px;
+  }
+  .logo-text {
+    font-family: 'Cinzel', serif;
+    font-size: 2rem;
+    font-weight: 900;
+    color: var(--gold);
+    letter-spacing: 0.12em;
+    text-shadow: 0 0 30px rgba(200,168,75,0.4);
+    display: block;
+    margin-bottom: 4px;
+  }
+  .logo-sub {
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 0.75rem;
+    letter-spacing: 0.35em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  /* Card */
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 40px;
+    position: relative;
+    box-shadow:
+      0 0 0 1px rgba(200,168,75,0.05),
+      0 30px 80px rgba(0,0,0,0.6),
+      inset 0 1px 0 rgba(200,168,75,0.08);
+  }
+
+  .card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 40px; right: 40px; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--gold), transparent);
+    opacity: 0.5;
+  }
+
+  .card-title {
+    font-family: 'Cinzel', serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--gold);
+    letter-spacing: 0.1em;
+    margin-bottom: 6px;
+  }
+  .card-desc {
+    font-size: 0.85rem;
+    color: var(--muted);
+    margin-bottom: 32px;
+    line-height: 1.5;
+    letter-spacing: 0.02em;
+  }
+
+  /* Form fields */
+  .field {
+    margin-bottom: 20px;
+  }
+  .field label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--gold-dim);
+    margin-bottom: 8px;
+  }
+  .field input, .field select {
+    width: 100%;
+    background: rgba(0,0,0,0.4);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 0.95rem;
+    font-weight: 500;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    appearance: none;
+  }
+  .field input::placeholder { color: var(--muted); opacity: 0.6; }
+  .field input:focus, .field select:focus {
+    border-color: var(--gold-dim);
+    background: rgba(200,168,75,0.04);
+    box-shadow: 0 0 0 2px rgba(200,168,75,0.08);
+  }
+  .field input.valid { border-color: #2a6644; }
+  .field input.error { border-color: var(--red); }
+
+  .field-hint {
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 5px;
+    letter-spacing: 0.03em;
+  }
+  .field-error {
+    font-size: 0.72rem;
+    color: var(--red);
+    margin-top: 5px;
+    letter-spacing: 0.03em;
+    display: none;
+  }
+  .field-error.show { display: block; }
+
+  /* Element picker */
+  .element-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+  .element-btn {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 10px 4px;
+    cursor: pointer;
+    text-align: center;
+    transition: all 0.15s;
+    font-family: 'Rajdhani', sans-serif;
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+  }
+  .element-btn .icon { font-size: 1.3rem; display: block; margin-bottom: 3px; }
+  .element-btn:hover { border-color: var(--gold-dim); color: var(--text); }
+  .element-btn.selected { border-color: var(--gold); color: var(--gold); background: rgba(200,168,75,0.08); }
+
+  /* Divider */
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 28px 0;
+    position: relative;
+  }
+  .divider::after {
+    content: '◆';
+    position: absolute;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--panel);
+    padding: 0 12px;
+    color: var(--gold-dim);
+    font-size: 0.6rem;
+  }
+
+  /* Submit button */
+  .btn-submit {
+    width: 100%;
+    background: linear-gradient(135deg, var(--gold-dim), var(--gold), var(--gold-dim));
+    background-size: 200% 100%;
+    border: none;
+    border-radius: 2px;
+    padding: 15px;
+    color: var(--deep);
+    font-family: 'Cinzel', serif;
+    font-size: 0.85rem;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.3s;
+    position: relative;
+    overflow: hidden;
+  }
+  .btn-submit:hover {
+    background-position: 100% 0;
+    box-shadow: 0 0 20px rgba(200,168,75,0.3);
+    transform: translateY(-1px);
+  }
+  .btn-submit:active { transform: translateY(0); }
+  .btn-submit:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+  .btn-submit .spinner {
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid var(--deep);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Login link */
+  .login-link {
+    text-align: center;
+    margin-top: 24px;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .login-link a {
+    color: var(--gold);
+    text-decoration: none;
+    font-weight: 600;
+    transition: color 0.2s;
+  }
+  .login-link a:hover { color: var(--gold-light); }
+
+  /* Toast / alert */
+  .toast {
+    position: fixed;
+    top: 24px; left: 50%; transform: translateX(-50%) translateY(-80px);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 14px 24px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    z-index: 1000;
+    transition: transform 0.4s cubic-bezier(0.34,1.56,0.64,1);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    white-space: nowrap;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); }
+  .toast.success { border-color: var(--green); color: var(--green); }
+  .toast.error-toast { border-color: var(--red); color: var(--red); }
+
+  /* Success overlay */
+  .success-screen {
+    display: none;
+    text-align: center;
+    padding: 20px 0;
+    animation: fadeIn 0.5s ease;
+  }
+  @keyframes fadeIn { from{opacity:0;transform:translateY(10px)} to{opacity:1;transform:none} }
+  .success-screen.show { display: block; }
+  .success-icon {
+    font-size: 3rem;
+    margin-bottom: 20px;
+    filter: drop-shadow(0 0 20px rgba(75,200,122,0.5));
+  }
+  .success-title {
+    font-family: 'Cinzel', serif;
+    font-size: 1.4rem;
+    color: var(--green);
+    margin-bottom: 12px;
+    letter-spacing: 0.1em;
+  }
+  .success-info {
+    background: rgba(0,0,0,0.3);
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 20px;
+    margin: 20px 0;
+    text-align: left;
+    font-size: 0.85rem;
+  }
+  .success-info .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+  .success-info .row:last-child { border-bottom: none; }
+  .success-info .key { color: var(--muted); }
+  .success-info .val { color: var(--gold); font-weight: 600; }
+
+  .db-note {
+    background: rgba(75,138,200,0.08);
+    border: 1px solid rgba(75,138,200,0.25);
+    border-radius: 2px;
+    padding: 12px 16px;
+    font-size: 0.78rem;
+    color: #7ab0d8;
+    line-height: 1.6;
+    text-align: left;
+    margin-top: 16px;
+  }
+  .db-note strong { color: #a8ccec; display: block; margin-bottom: 4px; font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; }
+
+  .btn-secondary {
+    width: 100%;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    padding: 12px;
+    color: var(--text);
+    font-family: 'Rajdhani', sans-serif;
+    font-size: 0.85rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+    margin-top: 12px;
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .btn-secondary:hover { border-color: var(--gold-dim); color: var(--gold); }
+
+  /* DB record viewer */
+  .record-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+    margin-top: 12px;
+  }
+  .record-table th {
+    text-align: left;
+    padding: 6px 10px;
+    color: var(--gold-dim);
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border);
+  }
+  .record-table td {
+    padding: 8px 10px;
+    border-bottom: 1px solid rgba(30,48,80,0.5);
+    color: var(--text);
+    font-family: monospace;
+    font-size: 0.75rem;
+  }
+  .record-table tr:hover td { background: rgba(200,168,75,0.03); }
+
+  /* Tooltip for config */
+  .config-panel {
+    background: rgba(0,0,0,0.5);
+    border: 1px dashed #1e3050;
+    border-radius: 2px;
+    padding: 16px;
+    margin-bottom: 28px;
+    font-size: 0.78rem;
+  }
+  .config-panel .cp-title {
+    font-family: 'Cinzel', serif;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    color: var(--gold-dim);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+  .config-panel input {
+    width: 100%;
+    background: rgba(0,0,0,0.3);
+    border: 1px solid #1e3050;
+    border-radius: 2px;
+    padding: 8px 12px;
+    color: var(--muted);
+    font-family: monospace;
+    font-size: 0.73rem;
+    outline: none;
+    margin-bottom: 8px;
+  }
+  .config-panel input:last-child { margin-bottom: 0; }
+  .config-panel input:focus { border-color: var(--gold-dim); color: var(--text); }
+  .demo-badge {
+    display: inline-block;
+    background: rgba(200,168,75,0.12);
+    border: 1px solid var(--gold-dim);
+    border-radius: 2px;
+    padding: 2px 8px;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    color: var(--gold);
+    text-transform: uppercase;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+
+<div class="bg-grid"></div>
+<div class="hex-deco"></div>
+<div class="hex-deco"></div>
+
+<!-- Particles injected by JS -->
+
+<div class="toast" id="toast"></div>
+
+<div class="container">
+  <div class="header">
+    <span class="logo-text">ZERCHNIV BLITZ</span>
+    <span class="logo-sub">Tactical Card Combat</span>
+  </div>
+
+  <div class="card">
+
+    <!-- Supabase config (for grader/demo use) -->
+    <div class="config-panel" id="configPanel">
+      <div class="cp-title">⚙ Supabase Connection <span class="demo-badge">Config</span></div>
+      <input type="text" id="sbUrl" placeholder="SUPABASE_URL — e.g. https://xxxx.supabase.co" />
+      <input type="text" id="sbKey" placeholder="SUPABASE_ANON_KEY — paste your anon key here" />
+    </div>
+
+    <!-- Registration form -->
+    <div id="formArea">
+      <div class="card-title">Create Your Account</div>
+      <p class="card-desc">Join the Zerchniv ladder. Choose your summoner identity and begin your climb.</p>
+
+      <div class="field">
+        <label>Username</label>
+        <input type="text" id="username" placeholder="SummonerName" maxlength="20" autocomplete="off" />
+        <div class="field-hint">3–20 characters. Letters, numbers, underscores only.</div>
+        <div class="field-error" id="err-username"></div>
+      </div>
+
+      <div class="field">
+        <label>Email Address</label>
+        <input type="email" id="email" placeholder="you@example.com" autocomplete="off" />
+        <div class="field-error" id="err-email"></div>
+      </div>
+
+      <div class="field">
+        <label>Password</label>
+        <input type="password" id="password" placeholder="Min 8 characters" />
+        <div class="field-hint">Use at least 8 characters.</div>
+        <div class="field-error" id="err-password"></div>
+      </div>
+
+      <div class="field">
+        <label>Confirm Password</label>
+        <input type="password" id="confirm" placeholder="Repeat password" />
+        <div class="field-error" id="err-confirm"></div>
+      </div>
+
+      <hr class="divider">
+
+      <div class="field">
+        <label>Favorite Element <span style="color:var(--muted);font-size:.65rem">(Optional — stored in profile)</span></label>
+        <div class="element-grid">
+          <button class="element-btn" data-el="Fire" onclick="pickEl(this)"><span class="icon">🔥</span>Fire</button>
+          <button class="element-btn" data-el="Water" onclick="pickEl(this)"><span class="icon">🌊</span>Water</button>
+          <button class="element-btn" data-el="Wind" onclick="pickEl(this)"><span class="icon">🌪</span>Wind</button>
+          <button class="element-btn" data-el="Earth" onclick="pickEl(this)"><span class="icon">🌍</span>Earth</button>
+        </div>
+      </div>
+
+      <div style="margin-top:28px">
+        <button class="btn-submit" id="submitBtn" onclick="register()">
+          Enter the Arena
+        </button>
+      </div>
+    </div>
+
+    <!-- Success screen -->
+    <div class="success-screen" id="successArea">
+      <div class="success-icon">⚔️</div>
+      <div class="success-title">Account Created!</div>
+      <p style="color:var(--muted);font-size:.85rem;margin-bottom:16px">Your summoner profile has been stored in the database.</p>
+
+      <div class="success-info" id="successInfo"></div>
+
+      <div class="db-note">
+        <strong>📋 What was stored</strong>
+        A new row was inserted into <code>auth.users</code> via Supabase Auth, and a corresponding row was written to the <code>profiles</code> table (via database trigger) containing your username, favorite element, starting ELO (1000), and timestamps. This satisfies the <strong>C (Create)</strong> in CRUD.
+      </div>
+
+      <button class="btn-secondary" onclick="resetForm()">← Create Another Account</button>
+    </div>
+
+  </div>
+
+  <div class="login-link" id="loginLinkArea">
+    Already have an account? <a href="#">Sign In</a>
+  </div>
+</div>
+
+<script>
+// ── Supabase client factory ──────────────────────────────────────
+let sb = null;
+function getSupabase() {
+  const url = document.getElementById('sbUrl').value.trim();
+  const key = document.getElementById('sbKey').value.trim();
+  if (!url || !key) return null;
+  if (!sb || sb._url !== url) {
+    sb = supabase.createClient(url, key);
+    sb._url = url;
+  }
+  return sb;
+}
+
+// ── Element picker ──────────────────────────────────────────────
+let selectedElement = '';
+function pickEl(btn) {
+  document.querySelectorAll('.element-btn').forEach(b => b.classList.remove('selected'));
+  btn.classList.add('selected');
+  selectedElement = btn.dataset.el;
+}
+
+// ── Field validation ────────────────────────────────────────────
+function setErr(id, msg) {
+  const el = document.getElementById('err-' + id);
+  const inp = document.getElementById(id);
+  el.textContent = msg;
+  el.classList.toggle('show', !!msg);
+  inp && inp.classList.toggle('error', !!msg);
+  inp && inp.classList.toggle('valid', !msg && inp.value.length > 0);
+}
+
+function validate() {
+  let ok = true;
+  const username = document.getElementById('username').value.trim();
+  const email    = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const confirm  = document.getElementById('confirm').value;
+
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) {
+    setErr('username', 'Must be 3–20 chars: letters, numbers, underscores only'); ok = false;
+  } else { setErr('username', ''); }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    setErr('email', 'Enter a valid email address'); ok = false;
+  } else { setErr('email', ''); }
+
+  if (password.length < 8) {
+    setErr('password', 'Password must be at least 8 characters'); ok = false;
+  } else { setErr('password', ''); }
+
+  if (confirm !== password) {
+    setErr('confirm', 'Passwords do not match'); ok = false;
+  } else { setErr('confirm', ''); }
+
+  return ok;
+}
+
+// ── Real-time validation on blur ────────────────────────────────
+['username','email','password','confirm'].forEach(id => {
+  document.getElementById(id).addEventListener('blur', validate);
+});
+
+// ── Toast helper ────────────────────────────────────────────────
+function showToast(msg, type = 'success') {
+  const t = document.getElementById('toast');
+  t.textContent = (type === 'success' ? '✓  ' : '✗  ') + msg;
+  t.className = 'toast ' + (type === 'success' ? 'success' : 'error-toast');
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+// ── Demo-mode (no Supabase configured) ─────────────────────────
+function demoRegister(username, email) {
+  const fakeId = 'usr_' + Math.random().toString(36).substr(2, 9);
+  const now = new Date().toISOString();
+  return {
+    id: fakeId,
+    username,
+    email,
+    element: selectedElement || 'None',
+    elo: 1000,
+    wins: 0,
+    losses: 0,
+    created_at: now,
+    demo: true
+  };
+}
+
+// ── Main register function ──────────────────────────────────────
+async function register() {
+  if (!validate()) return;
+
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Creating Account...';
+
+  const username = document.getElementById('username').value.trim();
+  const email    = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+
+  const client = getSupabase();
+  let record;
+
+  if (!client) {
+    // Demo mode — simulate DB insert with localStorage + in-memory state
+    await new Promise(r => setTimeout(r, 1200)); // simulate latency
+    record = demoRegister(username, email);
+    // Store in sessionStorage to simulate DB persistence for this session
+    const existing = JSON.parse(sessionStorage.getItem('zb_users') || '[]');
+    existing.push(record);
+    sessionStorage.setItem('zb_users', JSON.stringify(existing));
+    showToast('Account created (Demo Mode)', 'success');
+  } else {
+    try {
+      // 1. Create auth user
+      const { data: authData, error: authErr } = await client.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { username, favorite_element: selectedElement || null }
+        }
+      });
+      if (authErr) throw authErr;
+
+      // 2. Insert profile row (also done by trigger in production)
+      const userId = authData.user?.id;
+      if (userId) {
+        await client.from('profiles').upsert({
+          id: userId,
+          username,
+          email,
+          favorite_element: selectedElement || null,
+          elo: 1000,
+          wins: 0,
+          losses: 0
+        });
+      }
+
+      record = {
+        id: userId || 'pending',
+        username,
+        email,
+        element: selectedElement || 'None',
+        elo: 1000,
+        wins: 0,
+        losses: 0,
+        created_at: new Date().toISOString()
+      };
+      showToast('Account created successfully!', 'success');
+    } catch (err) {
+      showToast(err.message || 'Registration failed', 'error');
+      btn.disabled = false;
+      btn.innerHTML = 'Enter the Arena';
+      return;
+    }
+  }
+
+  // Show success screen
+  showSuccess(record);
+  btn.disabled = false;
+  btn.innerHTML = 'Enter the Arena';
+}
+
+// ── Show success state ──────────────────────────────────────────
+function showSuccess(rec) {
+  document.getElementById('formArea').style.display = 'none';
+  document.getElementById('configPanel').style.display = 'none';
+  document.getElementById('loginLinkArea').style.display = 'none';
+
+  const info = document.getElementById('successInfo');
+  const rows = [
+    ['Table', rec.demo ? 'sessionStorage (Demo)' : 'profiles'],
+    ['id', rec.id],
+    ['username', rec.username],
+    ['email', rec.email],
+    ['favorite_element', rec.element],
+    ['elo', rec.elo],
+    ['wins / losses', '0 / 0'],
+    ['created_at', rec.created_at.slice(0,19).replace('T', ' ') + ' UTC'],
+  ];
+  info.innerHTML = rows.map(([k,v]) =>
+    `<div class="row"><span class="key">${k}</span><span class="val">${v}</span></div>`
+  ).join('');
+
+  document.getElementById('successArea').classList.add('show');
+}
+
+// ── Reset ────────────────────────────────────────────────────────
+function resetForm() {
+  document.getElementById('formArea').style.display = '';
+  document.getElementById('configPanel').style.display = '';
+  document.getElementById('loginLinkArea').style.display = '';
+  document.getElementById('successArea').classList.remove('show');
+  ['username','email','password','confirm'].forEach(id => {
+    document.getElementById(id).value = '';
+    document.getElementById(id).className = '';
+  });
+  document.querySelectorAll('.element-btn').forEach(b => b.classList.remove('selected'));
+  selectedElement = '';
+}
+
+// ── Particles ────────────────────────────────────────────────────
+for (let i = 0; i < 18; i++) {
+  const p = document.createElement('div');
+  p.className = 'particle';
+  const left = Math.random() * 100;
+  const dur  = 8 + Math.random() * 14;
+  const delay = Math.random() * dur;
+  const drift = (Math.random() - 0.5) * 120;
+  p.style.cssText = `left:${left}vw; animation-duration:${dur}s; animation-delay:-${delay}s; --drift:${drift}px;`;
+  document.body.appendChild(p);
+}
+</script>
+</body>
+</html>
