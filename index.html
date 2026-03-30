@@ -233,6 +233,42 @@ html,body{width:100%;height:100%;overflow:hidden;font-family:'Rajdhani',sans-ser
 .phb{padding:.28rem .7rem;font-size:.65rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;border-radius:3px;background:var(--s2);color:var(--dm);border:1px solid var(--bd);}
 .phb.on{background:rgba(139,0,0,.18);color:var(--tx);border-color:var(--C);}
 
+.modal-overlay{
+  position:fixed;inset:0;z-index:200;
+  background:rgba(0,0,0,.75);backdrop-filter:blur(4px);
+  display:flex;align-items:center;justify-content:center;
+  opacity:0;pointer-events:none;transition:opacity .25s;
+}
+.modal-overlay.open{opacity:1;pointer-events:all;}
+.modal{
+  background:#0f0f0d;border:1px solid var(--C);border-radius:4px;
+  padding:36px 40px;width:100%;max-width:420px;position:relative;
+  box-shadow:0 0 60px rgba(139,0,0,.35),0 30px 80px rgba(0,0,0,.8);
+}
+.modal::before{
+  content:'';position:absolute;top:0;left:40px;right:40px;height:1px;
+  background:linear-gradient(90deg,transparent,var(--G),transparent);opacity:.5;
+}
+.modal-close{position:absolute;top:14px;right:16px;background:transparent;border:none;color:var(--dm);font-size:1.2rem;cursor:pointer;transition:color .2s;}
+.modal-close:hover{color:var(--tx);}
+.modal-title{font-family:'Cinzel',serif;font-size:1.1rem;font-weight:700;color:var(--G);letter-spacing:.1em;margin-bottom:6px;}
+.modal-desc{font-size:.82rem;color:var(--dm);margin-bottom:28px;}
+.mfield{margin-bottom:18px;}
+.mfield label{display:block;font-size:.68rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:rgba(201,168,76,.6);margin-bottom:7px;}
+.mfield input{width:100%;background:rgba(0,0,0,.5);border:1px solid rgba(139,0,0,.4);border-radius:2px;padding:11px 14px;color:var(--tx);font-family:'Rajdhani',sans-serif;font-size:.93rem;outline:none;transition:border-color .2s;}
+.mfield input::placeholder{color:var(--dm);opacity:.5;}
+.mfield input:focus{border-color:rgba(201,168,76,.5);}
+.merr-txt{font-size:.7rem;color:#c84b4b;margin-top:4px;display:none;}
+.merr-txt.show{display:block;}
+.mbtn{width:100%;background:linear-gradient(135deg,#5a1010,var(--C),#5a1010);background-size:200% 100%;border:none;border-radius:2px;padding:13px;color:var(--tx);font-family:'Cinzel',serif;font-size:.82rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;cursor:pointer;transition:all .3s;margin-top:8px;}
+.mbtn:hover{background-position:100% 0;box-shadow:0 0 20px rgba(139,0,0,.5);transform:translateY(-1px);}
+.mbtn:disabled{opacity:.45;cursor:not-allowed;transform:none;}
+.mbtn .mspinner{display:inline-block;width:12px;height:12px;border:2px solid var(--tx);border-top-color:transparent;border-radius:50%;animation:mspin .7s linear infinite;vertical-align:middle;margin-right:7px;}
+@keyframes mspin{to{transform:rotate(360deg);}}
+.mswitch{text-align:center;margin-top:20px;font-size:.8rem;color:var(--dm);}
+.mswitch a{color:var(--G);text-decoration:none;font-weight:600;cursor:pointer;}
+.mswitch a:hover{color:#e8c96d;}
+
 /* ══ MATCH OVERLAY ══ */
 .mscr{position:fixed;inset:0;z-index:800;display:none;flex-direction:column;background:#07050A;font-family:'Rajdhani',sans-serif;}
 .mscr.on{display:flex;}
@@ -878,11 +914,89 @@ function go(p){
   if(p==='deck') fc();
   if(p==='ladd') rL(LD,0);
 }
-function toggleLogin(){
-  loggedIn=!loggedIn;
-  document.getElementById('uav').textContent=loggedIn?un[0].toUpperCase():'?';
-  document.getElementById('uname').textContent=loggedIn?un:'Sign In';
+const SB_URL = 'https://jfzafetiidxlvtzsfodh.supabase.co';
+const SB_KEY = 'sb_publishable_iirve4pqW7oBVB9TILgpRA_yj86rxGp';
+const sb = window.supabase ? window.supabase.createClient(SB_URL, SB_KEY) : null;
+
+let currentUser = null;
+
+if (sb) {
+  sb.auth.getSession().then(({ data }) => { if (data.session) setLoggedIn(data.session.user); });
+  sb.auth.onAuthStateChange((_e, session) => { if (session) setLoggedIn(session.user); else setLoggedOut(); });
 }
+
+function setLoggedIn(user) {
+  currentUser = user;
+  const name = user.user_metadata?.username || user.email.split('@')[0];
+  document.getElementById('uav').textContent = name[0].toUpperCase();
+  document.getElementById('uname').textContent = name;
+  closeAuth();
+}
+function setLoggedOut() {
+  currentUser = null;
+  document.getElementById('uav').textContent = '?';
+  document.getElementById('uname').textContent = 'Sign In';
+}
+function toggleLogin() {
+  if (currentUser) {
+    if (confirm('Sign out?')) { sb && sb.auth.signOut(); setLoggedOut(); showMToast('Signed out','ok'); }
+  } else {
+    document.getElementById('authOverlay').classList.add('open');
+    setTimeout(() => document.getElementById('loginEmail').focus(), 100);
+  }
+}
+function closeAuth() { document.getElementById('authOverlay').classList.remove('open'); clearAuthErrors(); }
+document.getElementById('authOverlay').addEventListener('click', function(e){ if(e.target===this) closeAuth(); });
+function switchToRegister(){ document.getElementById('authLogin').style.display='none'; document.getElementById('authRegister').style.display=''; }
+function switchToLogin(){ document.getElementById('authRegister').style.display='none'; document.getElementById('authLogin').style.display=''; }
+
+async function doLogin() {
+  clearAuthErrors();
+  const email = document.getElementById('loginEmail').value.trim();
+  const pass  = document.getElementById('loginPassword').value;
+  if (!email) { showFieldErr('lerr-email','Email is required'); return; }
+  if (!pass)  { showFieldErr('lerr-pass','Password is required'); return; }
+  const btn = document.getElementById('loginBtn');
+  btn.disabled=true; btn.innerHTML='<span class="mspinner"></span>Signing in...';
+  const { data, error } = await sb.auth.signInWithPassword({ email, password: pass });
+  btn.disabled=false; btn.innerHTML='Enter the Arena';
+  if (error) { showFieldErr('lerr-general', error.message); }
+  else { setLoggedIn(data.user); showMToast('Welcome back, '+(data.user.user_metadata?.username||'Summoner')+'!','ok'); }
+}
+
+async function doRegister() {
+  clearAuthErrors();
+  const username = document.getElementById('regUsername').value.trim();
+  const email    = document.getElementById('regEmail').value.trim();
+  const pass     = document.getElementById('regPassword').value;
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username)) { showFieldErr('rerr-user','3–20 chars, letters/numbers/underscores'); return; }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showFieldErr('rerr-email','Enter a valid email'); return; }
+  if (pass.length < 8) { showFieldErr('rerr-pass','Min 8 characters'); return; }
+  const btn = document.getElementById('registerBtn');
+  btn.disabled=true; btn.innerHTML='<span class="mspinner"></span>Creating...';
+  const { data, error } = await sb.auth.signUp({ email, password: pass, options:{ data:{ username } } });
+  if (!error && data.user) await sb.from('profiles').upsert({ id:data.user.id, username, email, elo:1000, wins:0, losses:0 });
+  btn.disabled=false; btn.innerHTML='Create Account';
+  if (error) { showFieldErr('rerr-general', error.message); }
+  else { showMToast('Account created! Sign in now.','ok'); switchToLogin(); document.getElementById('loginEmail').value=email; }
+}
+
+async function deleteDeck(deckId, deckName, cardEl) {
+  if (!currentUser) { showMToast('Sign in first','bad'); return; }
+  if (!confirm(`Delete "${deckName}"?\n\nThis cannot be undone.`)) return;
+  if (sb) {
+    const { error } = await sb.from('decks').delete().eq('id',deckId).eq('player_id',currentUser.id);
+    if (error) { showMToast('Delete failed: '+error.message,'bad'); return; }
+  }
+  cardEl.style.transition='opacity .3s,transform .3s';
+  cardEl.style.opacity='0'; cardEl.style.transform='scale(.95)';
+  setTimeout(()=>cardEl.remove(), 300);
+  showMToast(`"${deckName}" deleted`,'ok');
+}
+
+function showFieldErr(id,msg){ const el=document.getElementById(id); if(el){el.textContent=msg;el.classList.add('show');} }
+function clearAuthErrors(){ ['lerr-email','lerr-pass','lerr-general','rerr-user','rerr-email','rerr-pass','rerr-general'].forEach(id=>{const el=document.getElementById(id);if(el){el.textContent='';el.classList.remove('show');}}); }
+function showMToast(msg,type){ const t=document.getElementById('m-toast'); t.textContent=(type==='ok'?'✓  ':'✗  ')+msg; t.className='mtoast '+type+' show'; setTimeout(()=>t.classList.remove('show'),3200); }
 function op(id){document.getElementById(id).classList.add('on');}
 function cl(id){document.getElementById(id).classList.remove('on');}
 function ev(e){e.stopPropagation();}
@@ -2061,6 +2175,33 @@ function launchMatch(){
   document.getElementById('mscr').classList.add('on');
 }
 function cancelM(){clearInterval(matchInt);cl('mmod');}
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<div class="modal-overlay" id="authOverlay">
+  <div class="modal">
+    <button class="modal-close" onclick="closeAuth()">✕</button>
+    <div id="authLogin">
+      <div class="modal-title">Sign In</div>
+      <p class="modal-desc">Enter the arena. Your ladder record awaits.</p>
+      <div class="mfield"><label>Email</label><input type="email" id="loginEmail" placeholder="you@example.com" /><div class="merr-txt" id="lerr-email"></div></div>
+      <div class="mfield"><label>Password</label><input type="password" id="loginPassword" placeholder="Your password" /><div class="merr-txt" id="lerr-pass"></div></div>
+      <div class="merr-txt show" id="lerr-general" style="margin-bottom:8px"></div>
+      <button class="mbtn" id="loginBtn" onclick="doLogin()">Enter the Arena</button>
+      <div class="mswitch">No account? <a onclick="switchToRegister()">Create one</a></div>
+    </div>
+    <div id="authRegister" style="display:none">
+      <div class="modal-title">Create Account</div>
+      <p class="modal-desc">Choose your summoner identity.</p>
+      <div class="mfield"><label>Username</label><input type="text" id="regUsername" placeholder="SummonerName" maxlength="20" /><div class="merr-txt" id="rerr-user"></div></div>
+      <div class="mfield"><label>Email</label><input type="email" id="regEmail" placeholder="you@example.com" /><div class="merr-txt" id="rerr-email"></div></div>
+      <div class="mfield"><label>Password</label><input type="password" id="regPassword" placeholder="Min 8 characters" /><div class="merr-txt" id="rerr-pass"></div></div>
+      <div class="merr-txt show" id="rerr-general" style="margin-bottom:8px"></div>
+      <button class="mbtn" id="registerBtn" onclick="doRegister()">Create Account</button>
+      <div class="mswitch">Have an account? <a onclick="switchToLogin()">Sign in</a></div>
+    </div>
+  </div>
+</div>
 
 </script>
 
