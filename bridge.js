@@ -15,10 +15,17 @@
  *  network.js calls M._setEssence, M._setUnits, M._setPhase etc.
  *  game.js (Phaser) needs tile/unit data to render the board.
  *  This file wires them together without touching either file.
+ *
+ *  FIX: Race condition resolved by deferring all M/game.js access
+ *  via setTimeout(0) so game.js fully parses before hooks run.
  * ═══════════════════════════════════════════════════════════════
  */
 
-document.addEventListener('DOMContentLoaded', function () {
+// ── TOP-HALF: DOM patching (patchM) ──────────────────────────
+// Wrapped in a helper that fires when DOM is ready, handling both
+// cases: script loads before or after DOMContentLoaded.
+
+function _initBridgeDOM() {
 
   function patchM() {
     if (typeof M === 'undefined') {
@@ -137,33 +144,27 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // ── 9. PHASE ─────────────────────────────────────────────
     // network.js calls M._setPhase(phase, turn, isMyTurn)
-    // phase arrives as lowercase from network.js e.g. 'setup_tiles', 'draw', 'main'
     // DO NOT forward to ZB here — network.js already calls ZB.onPhaseChange directly
     const _origSetPhase = M._setPhase;
     M._setPhase = function (phase, turn, isMyTurn) {
       if (_origSetPhase) _origSetPhase.call(M, phase, turn, isMyTurn);
 
-      // Update phase pills (only main-game phases have pills)
       ['standby', 'draw', 'main', 'end'].forEach(p => {
         const el = document.getElementById('m-ph-' + p);
         if (el) el.classList.toggle('on', p === phase);
       });
 
-      // Update turn counter
       const turnEl = document.getElementById('m-turn');
       if (turnEl && turn) turnEl.textContent = turn;
 
-      // Tell Phaser whose turn it is
       if (window.HexScene) {
         window.HexScene.isMyTurn = !!isMyTurn;
       }
 
-      // During Draw phase, highlight deck buttons
       _updateDrawPhaseUI(phase, isMyTurn);
 
       // NOTE: No ZB.onPhaseChange call here.
       // network.js _handlePhaseChange already calls ZB.onPhaseChange directly.
-      // Calling it here too would cause double-calls and state corruption.
     };
 
     // ── 10. INIT FROM SERVER ─────────────────────────────────
@@ -424,7 +425,15 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
   patchM();
-});
+
+} // end _initBridgeDOM
+
+// Fire _initBridgeDOM safely regardless of when this script loads
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _initBridgeDOM);
+} else {
+  _initBridgeDOM();
+}
 
 
 /* ═══════════════════════════════════════════════════════════════
@@ -437,8 +446,6 @@ document.addEventListener('DOMContentLoaded', function () {
 
    onStateChange ONLY handles tiles and units.
    It NEVER reads or sets phase/activePlayer from schema patches.
-   This prevents tile placements (which trigger schema patches)
-   from corrupting CS.currentPhase.
 
    Phase strings are always lowercase:
      'setup_tiles', 'setup_empire', 'standby', 'draw', 'main', 'end'
@@ -473,7 +480,7 @@ document.addEventListener('DOMContentLoaded', function () {
     mySeat:           null,
     mySessionId:      null,
     activePlayerId:   null,
-    currentPhase:     null,   // always lowercase: 'setup_tiles', 'draw', 'main' etc
+    currentPhase:     null,
     myHand:           [],
     tiles:            {},
     units:            {},
@@ -543,7 +550,6 @@ document.addEventListener('DOMContentLoaded', function () {
     setTimeout(() => ann.classList.remove('show'), 1600);
   }
 
-  // phase is always lowercase here
   function updatePhaseUI(phase) {
     ['standby', 'draw', 'main', 'end'].forEach(p => {
       const el = document.getElementById('m-ph-' + p);
@@ -626,7 +632,9 @@ document.addEventListener('DOMContentLoaded', function () {
         <div style="display:none;width:100%;height:100%;background:linear-gradient(160deg,${elemColor},rgba(10,10,8,.95));flex-direction:column;align-items:center;justify-content:center;gap:3px;padding:4px;text-align:center;">
           <div style="font-size:.52rem;font-weight:700;color:#F0E8DC">${def.name}</div>
           <div style="font-size:.44rem;color:rgba(201,168,76,.7);text-transform:uppercase">${def.type}</div>
-          ${def.type === 'unit' ? `<div style="font-size:.44rem;color:rgba(240,232,220,.5)">HP:${def.hp} SPD:${def.speed}</div>` : `<div style="font-size:.42rem;color:rgba(240,232,220,.4)">${(def.description||'').slice(0,30)}…</div>`}
+          ${def.type === 'unit'
+            ? `<div style="font-size:.44rem;color:rgba(240,232,220,.5)">HP:${def.hp} SPD:${def.speed}</div>`
+            : `<div style="font-size:.42rem;color:rgba(240,232,220,.4)">${(def.description||'').slice(0,30)}…</div>`}
         </div>
         <div class="mhcard-cost">${cost}</div>
       `;
@@ -725,11 +733,11 @@ document.addEventListener('DOMContentLoaded', function () {
     }
     const playBtn = pop.querySelector('.mcdpop-play');
     if (playBtn) {
-      const cost    = (def.essenceCost?.neutral ?? 0) + (def.essenceCost?.fire ?? 0) + (def.essenceCost?.water ?? 0);
+      const cost     = (def.essenceCost?.neutral ?? 0) + (def.essenceCost?.fire ?? 0) + (def.essenceCost?.water ?? 0);
       const totalEss = CS.essence.neutral + CS.essence.fire + CS.essence.water;
-      const phase   = (CS.currentPhase || '').toLowerCase();
-      const myMain  = isMyTurn() && phase === 'main';
-      const canPlay = myMain && totalEss >= cost;
+      const phase    = (CS.currentPhase || '').toLowerCase();
+      const myMain   = isMyTurn() && phase === 'main';
+      const canPlay  = myMain && totalEss >= cost;
       playBtn.textContent = def.type === 'unit' ? '⬡ Deploy Unit' : def.type === 'structure' ? '🏗 Deploy Structure' : '⚡ Play Blitz';
       playBtn.disabled = !canPlay;
       playBtn.onclick  = () => { pop.classList.remove('on'); if (def.type === 'unit') beginDeploy(cardId, def); else send('play_blitz', { cardId }); };
@@ -775,10 +783,13 @@ document.addEventListener('DOMContentLoaded', function () {
         existing.hasMoved = u.hasMovedThisTurn; existing.hasActed = u.hasAttackedThisTurn;
       } else {
         const def = CS.cardDefs[u.cardId] || {};
-        const newUnit = { id: u.instanceId, tileId: u.tileId, owner, name: def.name || u.cardId,
-          hp: u.currentHp, maxHp: def.hp || u.currentHp, speed: def.speed || 2, melee: def.melee || 1,
-          rangedRange: def.rangedRange || 0, defense: def.defense || 0,
-          hasMoved: u.hasMovedThisTurn, hasActed: u.hasAttackedThisTurn, deployRest: u.hasDevelopmentRest };
+        const newUnit = {
+          id: u.instanceId, tileId: u.tileId, owner,
+          name: def.name || u.cardId, hp: u.currentHp, maxHp: def.hp || u.currentHp,
+          speed: def.speed || 2, melee: def.melee || 1, rangedRange: def.rangedRange || 0,
+          defense: def.defense || 0, hasMoved: u.hasMovedThisTurn,
+          hasActed: u.hasAttackedThisTurn, deployRest: u.hasDevelopmentRest,
+        };
         window.HexScene.gameState.units.push(newUnit);
         window.HexScene._spawnToken(newUnit);
       }
@@ -825,18 +836,17 @@ document.addEventListener('DOMContentLoaded', function () {
     window.HexScene._onTileClick = function (tile) {
       const phase = (CS.currentPhase || '').toLowerCase();
       if (phase === 'setup_tiles' && CS.selectedTileType && isMyTurn()) {
-        const serverType = CS.selectedTileType;
         if (tile._zbPlaced) return;
         tile._zbPlaced = true;
-        tile.type = serverType;
+        tile.type = CS.selectedTileType;
         window.HexScene._drawTile(tile, window.HexScene.tileGfx[window.HexScene.tiles.indexOf(tile)]);
-        if (serverType === 'neutral') CS.myTilesLeft.neutral = Math.max(0, CS.myTilesLeft.neutral - 1);
-        else if (serverType === 'fire')  CS.myTilesLeft.fire  = Math.max(0, CS.myTilesLeft.fire  - 1);
-        else if (serverType === 'water') CS.myTilesLeft.water = Math.max(0, CS.myTilesLeft.water - 1);
+        if (CS.selectedTileType === 'neutral')     CS.myTilesLeft.neutral = Math.max(0, CS.myTilesLeft.neutral - 1);
+        else if (CS.selectedTileType === 'fire')   CS.myTilesLeft.fire    = Math.max(0, CS.myTilesLeft.fire    - 1);
+        else if (CS.selectedTileType === 'water')  CS.myTilesLeft.water   = Math.max(0, CS.myTilesLeft.water   - 1);
         renderHand();
-        console.log('[ZB] Sending place_tile:', String(tile.id), serverType, '| room:', !!_getRoom());
-        send('place_tile', { tileId: String(tile.id), tileType: serverType });
-        logCombat('⬡ Placed ' + serverType + ' tile', 's');
+        console.log('[ZB] Sending place_tile:', String(tile.id), CS.selectedTileType, '| room:', !!_getRoom());
+        send('place_tile', { tileId: String(tile.id), tileType: CS.selectedTileType });
+        logCombat('⬡ Placed ' + CS.selectedTileType + ' tile', 's');
         return;
       }
       if (phase === 'setup_empire' && isMyTurn()) {
@@ -903,7 +913,6 @@ document.addEventListener('DOMContentLoaded', function () {
     setTimeout(_resizePhaser, 200);
     setTimeout(() => { wireButtons(); _hookPhaserTileClick(); }, 300);
 
-    // phase from game_start — lowercase from server
     const phase = (initialState?.phase || initialState?.currentPhase || 'setup_tiles').toLowerCase();
     onPhaseChange(phase, activeSeat);
     renderHand();
@@ -921,14 +930,7 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // ── PHASE CHANGE ─────────────────────────────────────────────
-  // PRIMARY entry point — called by network.js _handlePhaseChange
-  // via ZB.onPhaseChange(phase, activePlayer)
-  //
-  // phase is ALWAYS lowercase: 'setup_tiles', 'setup_empire',
-  //   'standby', 'draw', 'main', 'end'
-  // activePlayerId is ALWAYS a seat label: 'p1' or 'p2'
   function onPhaseChange(phase, activePlayerId) {
-    // Normalize phase to lowercase just in case
     const normalPhase = (phase || '').toLowerCase();
     CS.currentPhase = normalPhase;
     if (activePlayerId) CS.activePlayerId = activePlayerId;
@@ -979,16 +981,12 @@ document.addEventListener('DOMContentLoaded', function () {
   }
 
   // ── STATE CHANGE ─────────────────────────────────────────────
-  // ONLY handles tiles and units.
-  // NEVER reads or sets phase/activePlayer from schema patches.
-  // Phase is handled exclusively by network.js → ZB.onPhaseChange.
+  // ONLY handles tiles and units. Phase handled exclusively by
+  // network.js → ZB.onPhaseChange. Never reads phase here.
   function onStateChange(state) {
     if (!state) return;
-    // Tiles only
     if (state.tiles) applyTileState(state.tiles);
-    // Units only
     if (state.units) applyUnitState(state.units);
-    // Phase intentionally ignored here — see architecture note at top of file
   }
 
   // ── PHASER EVENTS ─────────────────────────────────────────────
@@ -1043,11 +1041,13 @@ document.addEventListener('DOMContentLoaded', function () {
     CS, isMyTurn, onGameStart, onPhaseChange, onHandUpdate, onStateChange, send, renderHand, wireButtons,
   };
 
+  // ── PENDING START PICKUP ──────────────────────────────────────
+  // Increased delay to 300ms (was 50ms) so game.js has time to parse
   if (window._zbPendingStart) {
     console.log('[SERVER CLIENT] Picking up pending game start');
     const { seat, state } = window._zbPendingStart;
     window._zbPendingStart = null;
-    setTimeout(() => onGameStart(seat, state), 50);
+    setTimeout(() => onGameStart(seat, state), 300);
   }
 
   function _interceptColyseusRoom() {
@@ -1091,7 +1091,7 @@ document.addEventListener('DOMContentLoaded', function () {
 
         room.onMessage('hand_update',  msg => onHandUpdate(msg.cards));
         room.onMessage('phase_change', msg => {
-          // Safety net listener — network.js is primary path
+          // Safety net — network.js is the primary path
           console.log('[ZB] RAW phase_change msg:', JSON.stringify(msg));
           onPhaseChange(msg.phase, msg.activePlayer);
         });
@@ -1140,7 +1140,14 @@ document.addEventListener('DOMContentLoaded', function () {
 
   window.addEventListener('hexSceneReady', () => setTimeout(_hookPhaserTileClick, 200));
 
-  _installHooks();
+  // ── FIX: yield via setTimeout(0) so game.js fully parses before
+  //    _installHooks runs and tries to access M
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _installHooks);
+  } else {
+    setTimeout(_installHooks, 0);
+  }
+
   console.log('[SERVER CLIENT] Loaded');
 
 })();
