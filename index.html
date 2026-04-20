@@ -957,6 +957,26 @@ const OU=[
   {n:'WandererX',elo:2422,st:'online',dk:'Azure Guard'},
 ];
 
+// ═══════════════════ MATCH SCREEN GUARD ═══════════════════
+// Prevent bridge.js / network.js from showing the match screen before a game starts.
+(function guardMatchScreen(){
+  const hide = () => { const el = document.getElementById('mscr'); if (el) el.classList.remove('on'); };
+  hide();
+  document.addEventListener('DOMContentLoaded', function() {
+    hide();
+    const mscr = document.getElementById('mscr');
+    if (!mscr) return;
+    const origAdd = mscr.classList.add.bind(mscr.classList);
+    mscr.classList.add = function(...args) {
+      if (args.includes('on') && !window._matchStarted) {
+        console.warn('[GUARD] Blocked premature mscr show');
+        return;
+      }
+      origAdd(...args);
+    };
+  });
+})();
+
 // ═══════════════════ NAV ═══════════════════
 function go(p){
   document.querySelectorAll('.pg').forEach(x=>x.classList.remove('on'));
@@ -2204,6 +2224,7 @@ const M = (() => {
 
   function quit() {
     clearInterval(timerInt);
+    window._matchStarted = false;
     document.getElementById('mscr').classList.remove('on');
     TILES=[]; GS={};
   }
@@ -2225,6 +2246,7 @@ function startAI(){
   launchMatch();
 }
 function launchMatch(){
+  window._matchStarted = true;
   document.getElementById('mscr').classList.add('on');
 }
 function cancelM(){clearInterval(matchInt);cl('mmod');}
