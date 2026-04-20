@@ -1336,7 +1336,7 @@ rL(LD,0);
 /* ══════════════════════════════════════════════════
    MATCH ENGINE — namespace M
 ══════════════════════════════════════════════════ */
-const M = (() => {
+var M = (() => {
   // ── Card DB ──
   const CARDS=[
     {id:'ocean-wanderer',  name:'Ocean Wanderer',        t:'unit',e:'water',  c:2,hp:2, def:2,matk:2,ratk:'2-3',sz:'N',spd:2,ab:[['Bost Rost','First turn after Deploy Rest, may auto-move.'],['Firemask','Moving over fire tile costs no movement.']]},
@@ -2210,6 +2210,8 @@ const M = (() => {
 
   return { init, quit, endTurn, drawCard, selectAction, playCard, closePop };
 })();
+
+window.M = M;  //
 
 /* ═══ PATCH: connect startBat & startAI to match screen ═══ */
 function startBat(){
