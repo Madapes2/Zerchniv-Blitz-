@@ -845,30 +845,6 @@ const CTHUMBS={};
 </script>
 
 <script>
-const SB_URL='https://jfzafetiidxlvtzsfodh.supabase.co';
-const SB_KEY='sb_publishable_iirve4pqW7oBVB9TILgpRA_yj86rxGp';
-const sbClient=window.supabase?window.supabase.createClient(SB_URL,SB_KEY):null;
-let currentUser=null;
-if(sbClient){
-  sbClient.auth.getSession().then(({data})=>{if(data.session)setLoggedIn(data.session.user);});
-  sbClient.auth.onAuthStateChange((_e,session)=>{if(session)setLoggedIn(session.user);else setLoggedOut();});
-}
-function setLoggedIn(user){currentUser=user;const name=user.user_metadata?.username||user.email.split('@')[0];document.getElementById('uav').textContent=name[0].toUpperCase();document.getElementById('uname').textContent=name;closeAuth();}
-function setLoggedOut(){currentUser=null;document.getElementById('uav').textContent='?';document.getElementById('uname').textContent='Sign In';}
-function toggleLogin(){if(currentUser){if(confirm('Sign out?')){sbClient&&sbClient.auth.signOut();setLoggedOut();showMT('Signed out','ok');}}else{document.getElementById('authOverlay').classList.add('open');setTimeout(()=>document.getElementById('loginEmail').focus(),100);}}
-function closeAuth(){document.getElementById('authOverlay').classList.remove('open');clrErr();}
-window.addEventListener('load',()=>{const ov=document.getElementById('authOverlay');if(ov)ov.addEventListener('click',function(e){if(e.target===this)closeAuth();});});
-function switchToRegister(){document.getElementById('authLogin').style.display='none';document.getElementById('authRegister').style.display='';}
-function switchToLogin(){document.getElementById('authRegister').style.display='none';document.getElementById('authLogin').style.display='';}
-async function doLogin(){clrErr();const email=document.getElementById('loginEmail').value.trim();const pass=document.getElementById('loginPassword').value;if(!email){fErr('lerr-email','Email required');return;}if(!pass){fErr('lerr-pass','Password required');return;}const btn=document.getElementById('loginBtn');btn.disabled=true;btn.innerHTML='<span class="mspinner"></span>Signing in...';const{data,error}=await sbClient.auth.signInWithPassword({email,password:pass});btn.disabled=false;btn.innerHTML='Enter the Arena';if(error){fErr('lerr-general',error.message);}else{setLoggedIn(data.user);showMT('Welcome back, '+(data.user.user_metadata?.username||'Summoner')+'!','ok');}}
-async function doRegister(){clrErr();const username=document.getElementById('regUsername').value.trim();const email=document.getElementById('regEmail').value.trim();const pass=document.getElementById('regPassword').value;if(!/^[a-zA-Z0-9_]{3,20}$/.test(username)){fErr('rerr-user','3-20 chars');return;}if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){fErr('rerr-email','Valid email required');return;}if(pass.length<8){fErr('rerr-pass','Min 8 characters');return;}const btn=document.getElementById('registerBtn');btn.disabled=true;btn.innerHTML='<span class="mspinner"></span>Creating...';const{data,error}=await sbClient.auth.signUp({email,password:pass,options:{data:{username}}});if(!error&&data.user)await sbClient.from('profiles').upsert({id:data.user.id,username,email,elo:1000,wins:0,losses:0});btn.disabled=false;btn.innerHTML='Create Account';if(error){fErr('rerr-general',error.message);}else{showMT('Account created! Sign in now.','ok');switchToLogin();document.getElementById('loginEmail').value=email;}}
-async function deleteDeck(deckId,deckName,cardEl){if(!currentUser){showMT('Sign in first','bad');return;}if(!confirm('Delete "'+deckName+'"?\n\nThis cannot be undone.'))return;if(sbClient){const{error}=await sbClient.from('decks').delete().eq('id',deckId).eq('player_id',currentUser.id);if(error){showMT('Delete failed: '+error.message,'bad');return;}}cardEl.style.transition='opacity .3s,transform .3s';cardEl.style.opacity='0';cardEl.style.transform='scale(.95)';setTimeout(()=>cardEl.remove(),300);showMT('"'+deckName+'" deleted','ok');}
-function fErr(id,msg){const el=document.getElementById(id);if(el){el.textContent=msg;el.classList.add('show');}}
-function clrErr(){['lerr-email','lerr-pass','lerr-general','rerr-user','rerr-email','rerr-pass','rerr-general'].forEach(id=>{const el=document.getElementById(id);if(el){el.textContent='';el.classList.remove('show');}});}
-function showMT(msg,type){const t=document.getElementById('m-toast');if(!t)return;t.textContent=(type==='ok'?'✓  ':'✗  ')+msg;t.className='mtoast show';setTimeout(()=>t.classList.remove('show'),3200);}
-</script>
-
-<script>
 // ═══════════════════ HEX CANVAS ═══════════════════
 (function(){
   const c=document.getElementById('hxc');
