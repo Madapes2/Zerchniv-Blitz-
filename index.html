@@ -313,24 +313,959 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://unpkg.com/@colyseus/sdk@^0.17.0/dist/colyseus.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.60.0/phaser.min.js"></script>
-<script src="network.js"></script>
-<script src="bridge.js"></script>
-<script src="game.js?v=2"></script>
-
-<!-- Hide waiting overlay once opponent joins (game_started event does this via Bridge) -->
 <script>
-  // Patch Bridge.onGameStarted to also hide the waiting screen
-  const _origOnGameStarted = Bridge.onGameStarted.bind(Bridge);
-  // We can't override a const from IIFE directly, so Bridge exposes it.
-  // Instead, game.js's BattleScene.onGameStarted calls this after Bridge does.
-  // So just hide the overlay from game.js's onGameStarted call:
-  const _origBridgeOnGameStarted = Bridge.onGameStarted;
+// ── network.js ──────────────────────────────────────────
+// network.js — Colyseus client layer
+// Connects to the game server, owns the room reference, exposes send helpers,
+// and fires Bridge callbacks on every incoming message / state patch.
 
-  // Simpler: listen for the DOM event we fire from Bridge
+const NET = (() => {
+  const SERVER_URL = "wss://us-mia-55cdd0b8.colyseus.cloud";
+  const ROOM_NAME  = "battle_room";
+
+  let client = null;
+  let room   = null;
+  let mySeat = null;   // "p1" | "p2"
+
+  // ─── Public API ──────────────────────────────────────────────────────────
+
+  async function connect() {
+    try {
+      client = new Colyseus.Client(SERVER_URL);
+      _log("Connecting to " + SERVER_URL);
+      room = await client.joinOrCreate(ROOM_NAME);
+      _log("Joined room: " + room.id);
+      _bindRoomEvents();
+    } catch (err) {
+      console.error("[NET] Connection failed:", err);
+      Bridge.onConnectionError(err.message || "Connection failed");
+    }
+  }
+
+  // ─── Action senders ──────────────────────────────────────────────────────
+
+  function sendPlaceUnit(defName, q, r) {
+    _send("place_unit", { defName, q, r });
+  }
+
+  function sendMoveUnit(unitId, q, r) {
+    _send("move_unit", { unitId, q, r });
+  }
+
+  function sendAttackUnit(attackerId, targetId) {
+    _send("attack_unit", { attackerId, targetId });
+  }
+
+  function sendAttackEmpire(attackerId) {
+    _send("attack_empire", { attackerId });
+  }
+
+  function sendEndTurn() {
+    _send("end_turn", {});
+  }
+
+  function getSeat() { return mySeat; }
+
+  // ─── Internal ────────────────────────────────────────────────────────────
+
+  function _send(type, data) {
+    if (!room) { console.warn("[NET] Not connected – cannot send", type); return; }
+    room.send(type, data);
+  }
+
+  function _log(msg) {
+    console.log("[NET]", msg);
+  }
+
+  function _bindRoomEvents() {
+    // ── Seat assignment (first thing server sends) ──
+    room.onMessage("seat_assigned", (msg) => {
+      mySeat = msg.seat;
+      _log("Seat: " + mySeat);
+      Bridge.onSeatAssigned(mySeat);
+    });
+
+    // ── Game started ──
+    room.onMessage("game_started", (msg) => {
+      _log("Game started – active: " + msg.activePlayer);
+      Bridge.onGameStarted(msg.activePlayer);
+    });
+
+    // ── Server action broadcasts ──
+    room.onMessage("unit_placed", (msg) => {
+      Bridge.onUnitPlaced(msg);
+    });
+
+    room.onMessage("unit_moved", (msg) => {
+      Bridge.onUnitMoved(msg);
+    });
+
+    room.onMessage("unit_attacked", (msg) => {
+      Bridge.onUnitAttacked(msg);
+    });
+
+    room.onMessage("unit_died", (msg) => {
+      Bridge.onUnitDied(msg);
+    });
+
+    room.onMessage("empire_attacked", (msg) => {
+      Bridge.onEmpireAttacked(msg);
+    });
+
+    room.onMessage("turn_changed", (msg) => {
+      Bridge.onTurnChanged(msg);
+    });
+
+    room.onMessage("game_over", (msg) => {
+      Bridge.onGameOver(msg);
+    });
+
+    // ── Rejected action ──
+    room.onMessage("action_rejected", (msg) => {
+      Bridge.onActionRejected(msg.reason);
+    });
+
+    // ── Full state sync (Colyseus delta patches) ──
+    room.onStateChange((state) => {
+      Bridge.onStateSync(state);
+    });
+
+    // ── Disconnection ──
+    room.onLeave((code) => {
+      _log("Left room – code " + code);
+      Bridge.onDisconnected(code);
+    });
+
+    room.onError((code, message) => {
+      console.error("[NET] Room error:", code, message);
+      Bridge.onConnectionError(message);
+    });
+  }
+
+  return {
+    connect,
+    sendPlaceUnit,
+    sendMoveUnit,
+    sendAttackUnit,
+    sendAttackEmpire,
+    sendEndTurn,
+    getSeat,
+  };
+})();
+
+</script>
+<script>
+// ── bridge.js ──────────────────────────────────────────
+// bridge.js — wires Colyseus server events → Phaser scene + HUD
+// NET fires into Bridge; Bridge calls HexScene methods and updates the DOM.
+// Bridge never mutates game logic — it only reflects what the server says.
+
+const Bridge = (() => {
+
+  // Local mirror of server state (read-only — never mutate directly)
+  const state = {
+    seat:        null,   // "p1" | "p2"   — this client's seat
+    activePlayer: null,  // "p1" | "p2"
+    p1Hp: 10, p2Hp: 10,
+    p1Mana: 0, p2Mana: 0,
+    p1EmpireQ: 0, p1EmpireR:  4,
+    p2EmpireQ: 0, p2EmpireR: -4,
+    units: {},           // id → { id, owner, q, r, defName, hp, maxHp, atk, spd, moved, attacked }
+    phase: "waiting",
+    winner: null,
+  };
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────
+
+  function getScene() {
+    if (window.game) return window.game.scene.getScene("BattleScene");
+    return null;
+  }
+
+  function isMyTurn() {
+    return state.seat && state.activePlayer === state.seat;
+  }
+
+  function myMana() {
+    return state.seat === "p1" ? state.p1Mana : state.p2Mana;
+  }
+
+  // ─── Incoming from NET ────────────────────────────────────────────────────
+
+  function onSeatAssigned(seat) {
+    state.seat = seat;
+    _updateTurnLabel();
+    addLog("You are " + (seat === "p1" ? "Player 1 (Red Empire)" : "Player 2 (Blue Empire)"), "important");
+    addLog("Waiting for opponent...");
+    const wm = document.getElementById("waiting-msg");
+    if (wm) wm.textContent = "Connected as " + (seat === "p1" ? "Player 1" : "Player 2") + " — waiting for opponent...";
+  }
+
+  function onGameStarted(activePlayer) {
+    state.activePlayer = activePlayer;
+    state.phase = "playing";
+    _updateTurnLabel();
+    _updateManaDisplay();
+    _updateCardStates();
+    addLog("═══ Game started! ═══", "important");
+    if (isMyTurn()) addLog("Your turn — place, attack, or move, then end turn.", "important");
+    // Hide the waiting-for-opponent overlay
+    document.dispatchEvent(new Event("game_started_ui"));
+    document.getElementById("end-turn-btn").disabled = !isMyTurn();
+    const scene = getScene();
+    if (scene) scene.onGameStarted(state);
+  }
+
+  function onUnitPlaced(msg) {
+    // msg: { id, owner, defName, q, r }
+    const def = UNIT_DEFS[msg.defName];
+    if (!def) return;
+    state.units[msg.id] = {
+      id:       msg.id,
+      owner:    msg.owner,
+      q:        msg.q,
+      r:        msg.r,
+      defName:  msg.defName,
+      hp:       def.hp,
+      maxHp:    def.hp,
+      atk:      def.atk,
+      spd:      def.spd,
+      moved:    false,
+      attacked: false,
+    };
+    addLog((msg.owner === state.seat ? "You" : "Opponent") + " placed " + msg.defName + ".", msg.owner === state.seat ? "" : "enemy");
+    const scene = getScene();
+    if (scene) scene.redraw(state);
+  }
+
+  function onUnitMoved(msg) {
+    // msg: { id, q, r }
+    const u = state.units[msg.id];
+    if (!u) return;
+    u.q = msg.q; u.r = msg.r; u.moved = true;
+    addLog((u.owner === state.seat ? "Your" : "Enemy") + " " + u.defName + " moved.");
+    const scene = getScene();
+    if (scene) scene.redraw(state);
+  }
+
+  function onUnitAttacked(msg) {
+    // msg: { attackerId, targetId, damage, targetHp }
+    const atk = state.units[msg.attackerId];
+    const tgt = state.units[msg.targetId];
+    if (!atk || !tgt) return;
+    atk.attacked = true;
+    tgt.hp = msg.targetHp;
+    addLog(`${atk.defName} attacks ${tgt.defName} for ${msg.damage} (${tgt.hp} HP left)`, "damage");
+    const scene = getScene();
+    if (scene) scene.playAttackFX(atk, tgt, state);
+  }
+
+  function onUnitDied(msg) {
+    // msg: { id }
+    const u = state.units[msg.id];
+    if (u) addLog(u.defName + " was destroyed!", "death");
+    delete state.units[msg.id];
+    const scene = getScene();
+    if (scene) scene.redraw(state);
+  }
+
+  function onEmpireAttacked(msg) {
+    // msg: { attacker, target, damage, p1Hp, p2Hp }
+    state.p1Hp = msg.p1Hp;
+    state.p2Hp = msg.p2Hp;
+    const atkSeat = msg.attacker;
+    addLog(
+      (atkSeat === state.seat ? "Your unit" : "Enemy unit") +
+      " strikes " + (msg.target === state.seat ? "YOUR" : "enemy") +
+      " Empire for " + msg.damage + "!",
+      "damage"
+    );
+    _updateHpBars();
+    const scene = getScene();
+    if (scene) scene.redraw(state);
+  }
+
+  function onTurnChanged(msg) {
+    // msg: { activePlayer, p1Mana, p2Mana }
+    state.activePlayer = msg.activePlayer;
+    state.p1Mana = msg.p1Mana;
+    state.p2Mana = msg.p2Mana;
+
+    // Reset all unit flags for the new active player's units
+    for (const id in state.units) {
+      if (state.units[id].owner === msg.activePlayer) {
+        state.units[id].moved    = false;
+        state.units[id].attacked = false;
+      }
+    }
+
+    _updateTurnLabel();
+    _updateManaDisplay();
+    _updateCardStates();
+
+    if (isMyTurn()) {
+      addLog("─── Your turn begins ───", "important");
+      document.getElementById("end-turn-btn").disabled = false;
+    } else {
+      addLog("─── Opponent's turn ───", "enemy");
+      document.getElementById("end-turn-btn").disabled = true;
+    }
+
+    // Clear any selection
+    const scene = getScene();
+    if (scene) {
+      scene.clearSelection();
+      scene.redraw(state);
+    }
+  }
+
+  function onStateSync(serverState) {
+    // Full Colyseus delta sync — mirror all fields
+    if (serverState.p1Hp        !== undefined) state.p1Hp        = serverState.p1Hp;
+    if (serverState.p2Hp        !== undefined) state.p2Hp        = serverState.p2Hp;
+    if (serverState.p1Mana      !== undefined) state.p1Mana      = serverState.p1Mana;
+    if (serverState.p2Mana      !== undefined) state.p2Mana      = serverState.p2Mana;
+    if (serverState.activePlayer !== undefined) state.activePlayer = serverState.activePlayer;
+    if (serverState.phase        !== undefined) state.phase        = serverState.phase;
+    if (serverState.winner       !== undefined) state.winner       = serverState.winner;
+
+    // Sync units map
+    if (serverState.units) {
+      serverState.units.forEach((unit, id) => {
+        if (!state.units[id]) {
+          const def = UNIT_DEFS[unit.defName] || { hp: unit.hp, atk: unit.atk, spd: unit.spd };
+          state.units[id] = {
+            id, owner: unit.owner, q: unit.q, r: unit.r,
+            defName: unit.defName, hp: unit.hp, maxHp: unit.maxHp || def.hp,
+            atk: unit.atk, spd: unit.spd, moved: unit.moved, attacked: unit.attacked,
+          };
+        } else {
+          Object.assign(state.units[id], {
+            q: unit.q, r: unit.r, hp: unit.hp,
+            moved: unit.moved, attacked: unit.attacked,
+          });
+        }
+      });
+      // Remove units no longer on server
+      for (const id in state.units) {
+        if (!serverState.units.has(id)) delete state.units[id];
+      }
+    }
+
+    _updateHpBars();
+    _updateManaDisplay();
+    _updateCardStates();
+    _updateTurnLabel();
+  }
+
+  function onGameOver(msg) {
+    // msg: { winner, reason }
+    state.phase  = "gameover";
+    state.winner = msg.winner;
+    const iWon = msg.winner === state.seat;
+    addLog(iWon ? "═══ VICTORY! ═══" : "═══ DEFEAT ═══", iWon ? "important" : "death");
+    document.getElementById("end-turn-btn").disabled = true;
+
+    const overlay = document.getElementById("overlay");
+    document.getElementById("overlay-title").textContent = iWon ? "VICTORY" : "DEFEAT";
+    document.getElementById("overlay-title").style.color = iWon ? "var(--gold-light)" : "var(--red)";
+    document.getElementById("overlay-sub").textContent = iWon
+      ? "The enemy empire has been crushed."
+      : "Your empire lies in ruins.";
+    overlay.style.display = "flex";
+  }
+
+  function onActionRejected(reason) {
+    const MESSAGES = {
+      not_your_turn:            "It's not your turn.",
+      not_enough_mana:          "Not enough mana.",
+      hex_occupied:             "That hex is occupied.",
+      off_board:                "That hex is off the board.",
+      not_adjacent_to_empire:   "Must place adjacent to your Empire.",
+      unit_not_found:           "Unit not found.",
+      not_your_unit:            "That's not your unit.",
+      cannot_attack_own_unit:   "Can't attack your own unit.",
+      already_moved:            "Already moved this turn.",
+      already_attacked:         "Already attacked this turn.",
+      out_of_range:             "Target is out of range.",
+    };
+    addLog(MESSAGES[reason] || ("Rejected: " + reason), "important");
+  }
+
+  function onConnectionError(msg) {
+    addLog("Connection error: " + msg, "death");
+    document.getElementById("waiting-overlay").style.display = "flex";
+    document.getElementById("waiting-msg").textContent = "Connection failed — " + msg;
+  }
+
+  function onDisconnected(code) {
+    addLog("Disconnected (code " + code + ")", "death");
+  }
+
+  // ─── DOM helpers ──────────────────────────────────────────────────────────
+
+  function _updateHpBars() {
+    const myHp    = state.seat === "p1" ? state.p1Hp : state.p2Hp;
+    const enemyHp = state.seat === "p1" ? state.p2Hp : state.p1Hp;
+
+    document.getElementById("player-hp-text").textContent = myHp + " / 10";
+    document.getElementById("enemy-hp-text").textContent  = enemyHp + " / 10";
+    document.getElementById("player-hp-bar").style.width  = (myHp / 10 * 100) + "%";
+    document.getElementById("enemy-hp-bar").style.width   = (enemyHp / 10 * 100) + "%";
+  }
+
+  function _updateManaDisplay() {
+    document.getElementById("mana-text").textContent = myMana() + " / 2 Mana";
+  }
+
+  function _updateTurnLabel() {
+    const lbl = document.getElementById("turn-label");
+    if (state.phase === "waiting") {
+      lbl.textContent = "WAITING...";
+      lbl.style.color = "var(--muted)";
+    } else if (isMyTurn()) {
+      lbl.textContent = "YOUR TURN";
+      lbl.style.color = "var(--gold-light)";
+    } else {
+      lbl.textContent = "OPPONENT'S TURN";
+      lbl.style.color = "#6688cc";
+    }
+  }
+
+  function _updateCardStates() {
+    const mana = myMana();
+    UNIT_DEFS && Object.keys(UNIT_DEFS).forEach((name, i) => {
+      const card = document.getElementById("card-" + i);
+      if (!card) return;
+      const canAfford = UNIT_DEFS[name].cost <= mana;
+      const myTurn = isMyTurn();
+      if (!canAfford || !myTurn) card.classList.add("depleted");
+      else card.classList.remove("depleted");
+    });
+  }
+
+  // ─── Public getters for Phaser scene ─────────────────────────────────────
+
+  function getState()   { return state; }
+  function getMyTurn()  { return isMyTurn(); }
+  function getMyMana()  { return myMana(); }
+  function getMySeat()  { return state.seat; }
+
+  return {
+    // Incoming from NET
+    onSeatAssigned,
+    onGameStarted,
+    onUnitPlaced,
+    onUnitMoved,
+    onUnitAttacked,
+    onUnitDied,
+    onEmpireAttacked,
+    onTurnChanged,
+    onStateSync,
+    onGameOver,
+    onActionRejected,
+    onConnectionError,
+    onDisconnected,
+    // Outgoing to Phaser/DOM
+    getState,
+    getMyTurn,
+    getMyMana,
+    getMySeat,
+  };
+})();
+
+</script>
+<script>
+// ── game.js ─────────────────────────────────────────────
+// game.js?v=2 — Phaser HexScene
+// Display-only: renders the board from Bridge state, sends all
+// game actions through NET. Never mutates game state directly.
+
+// ─── Unit definitions (shared client-side reference for costs/stats) ──────────
+const UNIT_DEFS = {
+  Warrior:   { cost: 2, atk: 2, hp: 4, spd: 1, icon: "⚔"  },
+  Scout:     { cost: 1, atk: 1, hp: 2, spd: 2, icon: "🏃" },
+  Berserker: { cost: 3, atk: 4, hp: 3, spd: 1, icon: "🪓" },
+  Archer:    { cost: 2, atk: 2, hp: 2, spd: 1, icon: "🏹" },
+  Knight:    { cost: 4, atk: 3, hp: 7, spd: 1, icon: "🛡" },
+};
+
+const UNIT_DEF_NAMES = ["Warrior", "Scout", "Berserker", "Archer", "Knight"];
+
+// ─── Hex helpers ──────────────────────────────────────────────────────────────
+function hexToPixel(q, r, S, ox, oy) {
+  return {
+    x: ox + S * Math.sqrt(3) * (q + r / 2),
+    y: oy + S * 1.5 * r,
+  };
+}
+
+function pixelToHex(px, py, S, ox, oy) {
+  const x = (px - ox) / S;
+  const y = (py - oy) / S;
+  const q = x * Math.sqrt(3) / 3 - y / 3;
+  const r = y * 2 / 3;
+  return hexRound(q, r);
+}
+
+function hexRound(q, r) {
+  const s = -q - r;
+  let rq = Math.round(q), rr = Math.round(r), rs = Math.round(s);
+  const dq = Math.abs(rq - q), dr = Math.abs(rr - r), ds = Math.abs(rs - s);
+  if (dq > dr && dq > ds) rq = -rr - rs;
+  else if (dr > ds) rr = -rq - rs;
+  return { q: rq, r: rr };
+}
+
+function hexDist(q1, r1, q2, r2) {
+  return (Math.abs(q1 - q2) + Math.abs(q1 + r1 - q2 - r2) + Math.abs(r1 - r2)) / 2;
+}
+
+function hexNeighbors(q, r) {
+  return [
+    { q: q + 1, r }, { q: q - 1, r },
+    { q, r: r + 1 }, { q, r: r - 1 },
+    { q: q + 1, r: r - 1 }, { q: q - 1, r: r + 1 },
+  ];
+}
+
+// Board hex list
+const BOARD_HEXES = [];
+const BOARD_SET   = new Set();
+(function () {
+  const rows = [
+    { r: -4, qMin: -1, qMax: 2 }, { r: -3, qMin: -2, qMax: 3 },
+    { r: -2, qMin: -3, qMax: 3 }, { r: -1, qMin: -3, qMax: 4 },
+    { r:  0, qMin: -4, qMax: 4 }, { r:  1, qMin: -4, qMax: 3 },
+    { r:  2, qMin: -3, qMax: 3 }, { r:  3, qMin: -3, qMax: 2 },
+    { r:  4, qMin: -2, qMax: 1 },
+  ];
+  rows.forEach(({ r, qMin, qMax }) => {
+    for (let q = qMin; q <= qMax; q++) {
+      BOARD_HEXES.push({ q, r });
+      BOARD_SET.add(`${q},${r}`);
+    }
+  });
+})();
+
+function isOnBoard(q, r) { return BOARD_SET.has(`${q},${r}`); }
+
+// ─── Phaser Scene ─────────────────────────────────────────────────────────────
+class BattleScene extends Phaser.Scene {
+  constructor() { super({ key: "BattleScene" }); }
+
+  create() {
+    this.S   = 32;     // hex size
+    this.OX  = this.cameras.main.width  / 2;
+    this.OY  = this.cameras.main.height / 2 - 10;
+
+    this.hexGfx  = this.add.graphics();
+    this.unitGfx = this.add.graphics();
+    this.fxGfx   = this.add.graphics();
+    this.labels  = [];
+
+    // Selection state (local UI only — never authoritative)
+    this.selectedCard = null;   // defName string | null
+    this.selectedUnit = null;   // unit id | null
+    this.highlights   = new Set();
+
+    // Pointer events
+    this.input.on("pointermove", (ptr) => this._onHover(ptr));
+    this.input.on("pointerdown", (ptr) => this._onClick(ptr));
+
+    // Initial draw (board only, no units yet)
+    this.redraw(Bridge.getState());
+  }
+
+  // ─── Called by Bridge ─────────────────────────────────────────────────────
+
+  onGameStarted(state) {
+    this.redraw(state);
+  }
+
+  redraw(state) {
+    if (!state) return;
+    this._clearLabels();
+    this.hexGfx.clear();
+    this.unitGfx.clear();
+
+    const S = this.S, OX = this.OX, OY = this.OY;
+
+    // ── Draw hexes ──
+    BOARD_HEXES.forEach(({ q, r }) => {
+      const { x, y } = hexToPixel(q, r, S, OX, OY);
+      const key = `${q},${r}`;
+      const isHL  = this.highlights.has(key);
+      const isP1E = (q === state.p1EmpireQ && r === state.p1EmpireR);
+      const isP2E = (q === state.p2EmpireQ && r === state.p2EmpireR);
+      const mySeat = Bridge.getMySeat();
+      const isMyEmpire    = (mySeat === "p1" && isP1E) || (mySeat === "p2" && isP2E);
+      const isEnemyEmpire = (mySeat === "p1" && isP2E) || (mySeat === "p2" && isP1E);
+      const isSelUnit = this.selectedUnit && state.units[this.selectedUnit] &&
+                        state.units[this.selectedUnit].q === q &&
+                        state.units[this.selectedUnit].r === r;
+
+      this.hexGfx.lineStyle(1, 0x3a1f28, 0.8);
+
+      if      (isMyEmpire)    this.hexGfx.fillStyle(0x3a0a0a, 1);
+      else if (isEnemyEmpire) this.hexGfx.fillStyle(0x0a1a3a, 1);
+      else if (isSelUnit)     this.hexGfx.fillStyle(0x3a2800, 0.9);
+      else if (isHL)          this.hexGfx.fillStyle(0x1e2e10, 0.8);
+      else                    this.hexGfx.fillStyle(0x1a0e12, 1);
+
+      this._drawHex(this.hexGfx, x, y, S - 2);
+
+      // Empire markers
+      if (isMyEmpire || isEnemyEmpire) {
+        const color = isMyEmpire ? 0xcc3344 : 0x3388cc;
+        const stroke = isMyEmpire ? 0xff6677 : 0x66aaff;
+        this.unitGfx.fillStyle(color, 1);
+        this.unitGfx.fillCircle(x, y, S * 0.4);
+        this.unitGfx.lineStyle(2, stroke, 1);
+        this.unitGfx.strokeCircle(x, y, S * 0.4);
+        this._addLabel(x, y, "👑");
+      }
+    });
+
+    // ── Draw units ──
+    for (const id in state.units) {
+      const u = state.units[id];
+      const { x, y } = hexToPixel(u.q, u.r, S, OX, OY);
+      const mySeat    = Bridge.getMySeat();
+      const isMine    = u.owner === mySeat;
+      const isSelected = this.selectedUnit === id;
+
+      const color  = isMine ? 0x3388cc : 0x888899;
+      const stroke = isSelected ? 0xf0c060 : (isMine ? 0x66aaff : 0xaaaacc);
+
+      this.unitGfx.fillStyle(color, 1);
+      this.unitGfx.fillCircle(x, y, S * 0.38);
+      this.unitGfx.lineStyle(isSelected ? 3 : 2, stroke, 1);
+      this.unitGfx.strokeCircle(x, y, S * 0.38);
+
+      // HP bar
+      const barW = S * 0.7, barH = 4;
+      const barX = x - barW / 2, barY = y - S * 0.5 - barH - 1;
+      const frac = u.hp / (u.maxHp || 1);
+      this.unitGfx.fillStyle(0x220a08, 1);
+      this.unitGfx.fillRect(barX, barY, barW, barH);
+      const hpColor = frac > 0.5 ? 0x44cc55 : frac > 0.25 ? 0xddaa22 : 0xcc3322;
+      this.unitGfx.fillStyle(hpColor, 1);
+      this.unitGfx.fillRect(barX, barY, barW * frac, barH);
+
+      // Exhausted overlay
+      if (u.moved && u.attacked) {
+        this.unitGfx.fillStyle(0x000000, 0.4);
+        this.unitGfx.fillCircle(x, y, S * 0.38);
+      }
+
+      const def = UNIT_DEFS[u.defName];
+      if (def) this._addLabel(x, y, def.icon);
+    }
+  }
+
+  clearSelection() {
+    this.selectedCard = null;
+    this.selectedUnit = null;
+    this.highlights.clear();
+    document.querySelectorAll(".unit-card").forEach(c => c.classList.remove("selected"));
+  }
+
+  // Called by Bridge after an attack — small flash FX
+  playAttackFX(attacker, target, state) {
+    const { x: ax, y: ay } = hexToPixel(attacker.q, attacker.r, this.S, this.OX, this.OY);
+    const { x: tx, y: ty } = hexToPixel(target.q,   target.r,   this.S, this.OX, this.OY);
+
+    this.fxGfx.lineStyle(3, 0xff6633, 1);
+    this.fxGfx.lineBetween(ax, ay, tx, ty);
+    this.fxGfx.fillStyle(0xff4400, 1);
+    this.fxGfx.fillCircle(tx, ty, 8);
+
+    this.time.delayedCall(250, () => {
+      this.fxGfx.clear();
+      this.redraw(Bridge.getState());
+    });
+  }
+
+  // ─── Input handlers ───────────────────────────────────────────────────────
+
+  _onHover(ptr) {
+    const { q, r } = pixelToHex(ptr.x, ptr.y, this.S, this.OX, this.OY);
+    const state = Bridge.getState();
+    const tt    = document.getElementById("tooltip");
+
+    // Find unit or empire under cursor
+    let hovered = null;
+    for (const id in state.units) {
+      const u = state.units[id];
+      if (u.q === q && u.r === r) { hovered = u; break; }
+    }
+
+    if (hovered && isOnBoard(q, r)) {
+      const mySeat = Bridge.getMySeat();
+      document.getElementById("tt-name").textContent = (hovered.defName || "Unit") + " " + (UNIT_DEFS[hovered.defName]?.icon || "");
+      document.getElementById("tt-atk").textContent  = hovered.atk;
+      document.getElementById("tt-hp").textContent   = hovered.hp + " / " + hovered.maxHp;
+      document.getElementById("tt-spd").textContent  = hovered.spd;
+      document.getElementById("tt-own").textContent  = hovered.owner === mySeat ? "Ally" : "Enemy";
+      tt.style.display = "block";
+      tt.style.left    = (ptr.x + 14) + "px";
+      tt.style.top     = (ptr.y - 10) + "px";
+    } else {
+      tt.style.display = "none";
+    }
+  }
+
+  _onClick(ptr) {
+    if (!Bridge.getMyTurn()) return;
+
+    const { q, r } = pixelToHex(ptr.x, ptr.y, this.S, this.OX, this.OY);
+    if (!isOnBoard(q, r)) return;
+
+    const state   = Bridge.getState();
+    const mySeat  = Bridge.getMySeat();
+
+    // Which unit (if any) sits on the clicked hex?
+    let clickedUnit = null;
+    for (const id in state.units) {
+      const u = state.units[id];
+      if (u.q === q && u.r === r) { clickedUnit = u; break; }
+    }
+
+    // ── Placing a unit ──
+    if (this.selectedCard) {
+      const def = UNIT_DEFS[this.selectedCard];
+      if (!def) return;
+      if (def.cost > Bridge.getMyMana()) {
+        addLog("Not enough mana!", "important"); return;
+      }
+      if (clickedUnit) { addLog("Hex occupied!"); return; }
+      // adjacency check (client-side pre-validation; server validates authoritatively)
+      const eq = mySeat === "p1" ? state.p1EmpireQ : state.p2EmpireQ;
+      const er = mySeat === "p1" ? state.p1EmpireR : state.p2EmpireR;
+      if (hexDist(q, r, eq, er) > 1) { addLog("Must be adjacent to your Empire."); return; }
+
+      NET.sendPlaceUnit(this.selectedCard, q, r);
+      this.clearSelection();
+      this.highlights.clear();
+      return;
+    }
+
+    // ── Select own unit ──
+    if (clickedUnit && clickedUnit.owner === mySeat) {
+      this.selectedUnit = clickedUnit.id;
+      this._computeMoveHighlights(clickedUnit, state);
+      this.redraw(state);
+      return;
+    }
+
+    // ── Actions with a selected unit ──
+    if (this.selectedUnit) {
+      const sel = state.units[this.selectedUnit];
+      if (!sel) { this.clearSelection(); return; }
+
+      // Attack an enemy unit
+      if (clickedUnit && clickedUnit.owner !== mySeat) {
+        if (hexDist(sel.q, sel.r, clickedUnit.q, clickedUnit.r) > 1) {
+          addLog("Target out of attack range."); return;
+        }
+        NET.sendAttackUnit(sel.id, clickedUnit.id);
+        this.clearSelection();
+        this.highlights.clear();
+        return;
+      }
+
+      // Attack enemy empire
+      const enemySeat = mySeat === "p1" ? "p2" : "p1";
+      const eEmpQ = enemySeat === "p1" ? state.p1EmpireQ : state.p2EmpireQ;
+      const eEmpR = enemySeat === "p1" ? state.p1EmpireR : state.p2EmpireR;
+      if (q === eEmpQ && r === eEmpR) {
+        if (hexDist(sel.q, sel.r, eEmpQ, eEmpR) > 1) {
+          addLog("Empire out of reach."); return;
+        }
+        NET.sendAttackEmpire(sel.id);
+        this.clearSelection();
+        this.highlights.clear();
+        return;
+      }
+
+      // Move
+      if (!clickedUnit) {
+        if (hexDist(sel.q, sel.r, q, r) > sel.spd) {
+          addLog("Too far to move."); return;
+        }
+        NET.sendMoveUnit(sel.id, q, r);
+        this.clearSelection();
+        this.highlights.clear();
+        return;
+      }
+    }
+
+    // Deselect
+    this.clearSelection();
+    this.redraw(state);
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────
+
+  _computeMoveHighlights(unit, state) {
+    this.highlights.clear();
+    BOARD_HEXES.forEach(({ q, r }) => {
+      if (hexDist(unit.q, unit.r, q, r) <= unit.spd) {
+        // Don't highlight if occupied
+        let occ = false;
+        for (const id in state.units) {
+          if (state.units[id].q === q && state.units[id].r === r) { occ = true; break; }
+        }
+        if (!occ) this.highlights.add(`${q},${r}`);
+      }
+    });
+  }
+
+  _drawHex(g, cx, cy, r) {
+    const pts = [];
+    for (let i = 0; i < 6; i++) {
+      const a = Math.PI / 180 * (60 * i - 30);
+      pts.push({ x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) });
+    }
+    g.beginPath();
+    g.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < 6; i++) g.lineTo(pts[i].x, pts[i].y);
+    g.closePath();
+    g.fillPath();
+    g.strokePath();
+  }
+
+  _addLabel(x, y, txt) {
+    const t = this.add.text(x, y, txt, { fontSize: "14px", align: "center" }).setOrigin(0.5, 0.5);
+    this.labels.push(t);
+  }
+
+  _clearLabels() {
+    this.labels.forEach(t => t.destroy());
+    this.labels = [];
+  }
+}
+
+// ─── UI: card selection ───────────────────────────────────────────────────────
+function selectCard(idx) {
+  if (!Bridge.getMyTurn()) return;
+  const defName = UNIT_DEF_NAMES[idx];
+  if (!defName) return;
+  const def = UNIT_DEFS[defName];
+  if (def.cost > Bridge.getMyMana()) {
+    addLog("Need " + def.cost + " mana. You have " + Bridge.getMyMana() + ".", "important");
+    return;
+  }
+
+  const scene = window.game.scene.getScene("BattleScene");
+
+  // Toggle off if already selected
+  if (scene.selectedCard === defName) {
+    scene.clearSelection();
+    scene.redraw(Bridge.getState());
+    return;
+  }
+
+  scene.clearSelection();
+  scene.selectedCard = defName;
+  document.getElementById("card-" + idx).classList.add("selected");
+
+  // Highlight valid placement hexes (adjacent to own empire, unoccupied)
+  const state   = Bridge.getState();
+  const mySeat  = Bridge.getMySeat();
+  const eq = mySeat === "p1" ? state.p1EmpireQ : state.p2EmpireQ;
+  const er = mySeat === "p1" ? state.p1EmpireR : state.p2EmpireR;
+  scene.highlights.clear();
+  hexNeighbors(eq, er).forEach(({ q, r }) => {
+    if (!isOnBoard(q, r)) return;
+    let occ = false;
+    for (const id in state.units) {
+      if (state.units[id].q === q && state.units[id].r === r) { occ = true; break; }
+    }
+    if (!occ) scene.highlights.add(`${q},${r}`);
+  });
+  scene.redraw(state);
+  addLog("Click a highlighted hex to place " + defName + ".");
+}
+
+// ─── UI: end turn ─────────────────────────────────────────────────────────────
+function endTurn() {
+  if (!Bridge.getMyTurn()) return;
+  NET.sendEndTurn();
+  const scene = window.game.scene.getScene("BattleScene");
+  if (scene) scene.clearSelection();
+}
+
+// ─── UI: restart ──────────────────────────────────────────────────────────────
+function restartGame() {
+  location.reload();
+}
+
+// ─── Log helper (global) ─────────────────────────────────────────────────────
+function addLog(msg, cls) {
+  const log = document.getElementById("log");
+  if (!log) return;
+  const el = document.createElement("div");
+  el.className = "log-entry " + (cls || "");
+  el.textContent = msg;
+  log.prepend(el);
+  while (log.children.length > 12) log.removeChild(log.lastChild);
+}
+
+// ─── Phaser boot ─────────────────────────────────────────────────────────────
+function getCanvasSize() {
+  const wrap = document.getElementById("canvas-wrap");
+  return { w: wrap.clientWidth, h: wrap.clientHeight };
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  const { w, h } = getCanvasSize();
+
+  window.game = new Phaser.Game({
+    type:            Phaser.CANVAS,
+    canvas:          document.getElementById("phaser-canvas"),
+    width:           w,
+    height:          h,
+    backgroundColor: "#0a0608",
+    scene:           [BattleScene],
+  });
+
+  // Resize support
+  window.addEventListener("resize", () => {
+    const { w: nw, h: nh } = getCanvasSize();
+    window.game.scale.resize(nw, nh);
+    const scene = window.game.scene.getScene("BattleScene");
+    if (scene && scene.sys.isActive()) {
+      scene.OX = nw / 2;
+      scene.OY = nh / 2 - 10;
+      scene.redraw(Bridge.getState());
+    }
+  });
+
+  // Connect to Colyseus after scripts settle.
+  // game.events "ready" can fire before the IIFE in network.js fully evaluates
+  // in some browsers, so we use a short setTimeout instead.
+  setTimeout(() => {
+    if (typeof NET !== "undefined" && typeof NET.connect === "function") {
+      NET.connect();
+    } else {
+      console.error("[game.js] NET.connect not available — check network.js loaded correctly");
+      const wm = document.getElementById("waiting-msg");
+      if (wm) wm.textContent = "Error: network.js failed to load.";
+    }
+  }, 100);
+});
+
+</script>
+
+
+
+
+<script>
   document.addEventListener("game_started_ui", () => {
     document.getElementById("waiting-overlay").style.display = "none";
   });
 </script>
-
 </body>
 </html>
