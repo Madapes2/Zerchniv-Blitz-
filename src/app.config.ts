@@ -4,11 +4,11 @@ import { GameRoom } from "./rooms/GameRoom.js";
 
 export default config({
   initializeGameServer: (gameServer) => {
-    gameServer.define("battle_room", GameRoom);
+    gameServer.define("battle_room", GameRoom)
+      .filterBy(["roomId"]);  // each room is unique — no reuse
   },
 
   initializeExpress: (app) => {
-    // Allow requests from GitHub Pages and any origin during development
     app.use((req: any, res: any, next: any) => {
       res.header("Access-Control-Allow-Origin", "*");
       res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
