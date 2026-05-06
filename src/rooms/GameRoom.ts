@@ -1,5 +1,5 @@
 import { Room, Client } from "colyseus";
-import { Schema, MapSchema, ArraySchema, type, filter } from "@colyseus/schema";
+import { Schema, MapSchema, type } from "@colyseus/schema";
 
 // ─── Schema definitions ───────────────────────────────────────────────────────
 
@@ -85,7 +85,7 @@ export class GameRoom extends Room<GameState> {
   private nextUnitId = 0;
 
   onCreate() {
-    this.setState(new GameState());
+    this.setState(new GameState() as any);
     this.maxClients = 2;
 
     this.onMessage("place_unit",   (client, msg) => this.handlePlaceUnit(client, msg));

@@ -1,7 +1,7 @@
 import config from "@colyseus/tools";
 import { monitor } from "@colyseus/monitor";
 import { playground } from "@colyseus/playground";
-import { GameRoom } from "./rooms/GameRoom";
+import { GameRoom } from "./rooms/GameRoom.js";
 
 export default config({
   initializeGameServer: (gameServer) => {
