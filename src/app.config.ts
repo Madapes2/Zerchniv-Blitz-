@@ -1,28 +1,23 @@
 import config from "@colyseus/tools";
-import { GameRoom } from "./rooms/GameRoom.js";
+import { monitor } from "@colyseus/monitor";
+import { playground } from "@colyseus/playground";
+import { GameRoom } from "./rooms/GameRoom";
 
 export default config({
   initializeGameServer: (gameServer) => {
-    gameServer.define("game_room", GameRoom);
+    // Register "battle_room" — this is what the client calls joinOrCreate("battle_room")
+    gameServer.define("battle_room", GameRoom);
   },
 
-initializeExpress: (app) => {
-    app.use((req, res, next) => {
-      res.header("Access-Control-Allow-Origin", "*");
-      res.header("Access-Control-Allow-Headers", "*");
-      res.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      if (req.method === "OPTIONS") {
-        res.sendStatus(200);
-      } else {
-        next();
-      }
-    });
-    app.get("/", (req, res) => {
-      res.json({ status: "Zerchniv-Blitz server running", timestamp: new Date().toISOString() });
-    });
+  initializeExpress: (app) => {
+    // Optional: Colyseus monitor dashboard at /colyseus
+    if (process.env.NODE_ENV !== "production") {
+      app.use("/colyseus", monitor());
+      app.use("/playground", playground());
+    }
   },
 
   beforeListen: () => {
-    // Called before server starts listening
+    // Any setup before the server starts listening
   }
 });
