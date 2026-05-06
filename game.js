@@ -464,10 +464,16 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Connect to Colyseus after Phaser is ready
-  window.game.events.on("ready", () => {
-    NET.connect();
-  });
+  // Connect to Colyseus after scripts settle.
+  // game.events "ready" can fire before the IIFE in network.js fully evaluates
+  // in some browsers, so we use a short setTimeout instead.
+  setTimeout(() => {
+    if (typeof NET !== "undefined" && typeof NET.connect === "function") {
+      NET.connect();
+    } else {
+      console.error("[game.js] NET.connect not available — check network.js loaded correctly");
+      const wm = document.getElementById("waiting-msg");
+      if (wm) wm.textContent = "Error: network.js failed to load.";
+    }
+  }, 100);
 });
-
-
